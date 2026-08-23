@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "presets": [
+    {
+      "id": "off",
+      "name": "Anime4K Off",
+      "hotkey": 0,
+      "performance_class": "off",
+      "shaders": []
+    },
+    {
+      "id": "anime4k-fast",
+      "name": "Anime4K Fast",
+      "hotkey": 1,
+      "performance_class": "fast",
+      "shaders": [
+        "Anime4K/Anime4K_Clamp_Highlights.glsl",
+        "Anime4K/Anime4K_Restore_CNN_S.glsl",
+        "Anime4K/Anime4K_Upscale_CNN_x2_S.glsl"
+      ]
+    },
+    {
+      "id": "anime4k-balanced",
+      "name": "Anime4K Balanced",
+      "hotkey": 2,
+      "performance_class": "balanced",
+      "shaders": [
+        "Anime4K/Anime4K_Clamp_Highlights.glsl",
+        "Anime4K/Anime4K_Restore_CNN_M.glsl",
+        "Anime4K/Anime4K_Upscale_CNN_x2_M.glsl"
+      ]
+    },
+    {
+      "id": "anime4k-high",
+      "name": "Anime4K High",
+      "hotkey": 3,
+      "performance_class": "high",
+      "shaders": [
+        "Anime4K/Anime4K_Clamp_Highlights.glsl",
+        "Anime4K/Anime4K_Restore_CNN_L.glsl",
+        "Anime4K/Anime4K_Upscale_CNN_x2_L.glsl"
+      ]
+    },
+    {
+      "id": "anime4k-ultra",
+      "name": "Anime4K Ultra",
+      "hotkey": 4,
+      "performance_class": "ultra",
+      "shaders": [
+        "Anime4K/Anime4K_Clamp_Highlights.glsl",
+        "Anime4K/Anime4K_Restore_CNN_VL.glsl",
+        "Anime4K/Anime4K_Upscale_CNN_x2_VL.glsl"
+      ]
+    }
+  ]
+}

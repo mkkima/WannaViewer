@@ -1,0 +1,6 @@
+{
+  "id": "generic-html",
+  "version": 1,
+  "domains": ["*"],
+  "capabilities": ["public-static-media-links"]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "yummyanime",
+  "version": 1,
+  "domains": ["yummyanime.tv", "yummyani.me"],
+  "capabilities": ["catalog", "seasons", "voice-tracks", "episodes", "providers"]
+}

@@ -1,0 +1,6 @@
+{
+  "status": "success",
+  "data": {
+    "content": "<select name=\"series\"><option value=\"37572\" selected>1 серия</option><option value=\"37571\">2 серия</option></select>"
+  }
+}

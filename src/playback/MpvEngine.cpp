@@ -15,6 +15,7 @@ namespace {
 
 constexpr std::uint64_t kPauseObserver = 2;
 constexpr std::uint64_t kTrackObserver = 3;
+constexpr std::uint64_t kTimeObserver = 4;
 
 std::string FormatMpvValue(const mpv_event_property& property) {
     if (!property.data) return {};
@@ -78,12 +79,17 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         SetRequiredOption("osc", "no");
         SetRequiredOption("idle", "yes");
         SetRequiredOption("keep-open", "yes");
+        SetRequiredOption("background-color", "#090c11");
         SetRequiredOption("vo", "gpu-next");
         SetRequiredOption("hwdec", config_.GetString("playback.hwdec", "auto"));
         SetRequiredOption("interpolation", "no");
         SetRequiredOption("video-sync", config_.GetString("playback.video_sync", "display-resample"));
         SetRequiredOption("cache", "yes");
-        SetRequiredOption("cache-pause-initial", "yes");
+        // Start presenting as soon as demux/decode are ready. The normal cache
+        // remains enabled and can still pause on a later underrun, but waiting
+        // for a large initial network buffer makes healthy streams appear stuck
+        // at 00:00.
+        SetRequiredOption("cache-pause-initial", "no");
         const auto cacheMode = config_.GetString("network.cache_mode", "balanced");
         const auto readahead = cacheMode == "low-latency" ? "5" : cacheMode == "unstable" ? "60" :
                                config_.GetString("network.readahead_seconds", "20");
@@ -111,6 +117,7 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         (void)api_.RequestLogMessages(handle_, logger_.Level() >= LogLevel::Debug ? "info" : "warn");
         (void)api_.ObserveProperty(handle_, kPauseObserver, "pause", MPV_FORMAT_FLAG);
         (void)api_.ObserveProperty(handle_, kTrackObserver, "track-list/count", MPV_FORMAT_INT64);
+        (void)api_.ObserveProperty(handle_, kTimeObserver, "time-pos", MPV_FORMAT_DOUBLE);
         eventThread_ = std::jthread([this](std::stop_token token) { EventLoop(token); });
 #ifdef _WIN32
         logger_.Write(LogLevel::Info, "playback", "libmpv initialized: gpu-next, hwdec=auto, D3D11 output");
@@ -152,20 +159,35 @@ void MpvEngine::Command(std::initializer_list<std::string> arguments) {
 
 void MpvEngine::Open(std::string_view pathOrUrl, const std::vector<std::pair<std::string, std::string>>& headers,
                      std::string_view externalAudioUrl) {
-    if (!headers.empty()) {
-        std::string fields;
-        for (const auto& [name, value] : headers) {
-            if (name.find_first_of("\r\n:") != std::string::npos || value.find_first_of("\r\n") != std::string::npos) continue;
-            if (!fields.empty()) fields += ',';
-            fields += name + ": " + value;
-        }
-        (void)api_.SetPropertyString(handle_, "http-header-fields", fields.c_str());
-    } else {
-        (void)api_.SetPropertyString(handle_, "http-header-fields", "");
+    std::vector<std::string> fields;
+    fields.reserve(std::min<std::size_t>(headers.size(), 64));
+    std::size_t totalBytes = 0;
+    for (const auto& [name, value] : headers) {
+        if (fields.size() >= 64 || name.find_first_of("\r\n:") != std::string::npos ||
+            value.find_first_of("\r\n") != std::string::npos) continue;
+        const auto fieldBytes = name.size() + value.size() + 2;
+        if (fieldBytes > 16U * 1024U || totalBytes + fieldBytes > 64U * 1024U) continue;
+        fields.push_back(name + ": " + value);
+        totalBytes += fieldBytes;
     }
+    std::vector<mpv_node> values(fields.size());
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        values[index].format = MPV_FORMAT_STRING;
+        values[index].u.string = fields[index].data();
+    }
+    mpv_node_list list{static_cast<int>(values.size()), values.empty() ? nullptr : values.data(), nullptr};
+    mpv_node headerArray{};
+    headerArray.format = MPV_FORMAT_NODE_ARRAY;
+    headerArray.u.list = &list;
+    const int headerResult = api_.SetProperty(handle_, "http-header-fields", MPV_FORMAT_NODE, &headerArray);
+    if (headerResult < 0)
+        throw std::runtime_error(std::string("Unable to configure media request headers: ") +
+                                 api_.ErrorString(headerResult));
     Command({"loadfile", std::string(pathOrUrl), "replace"});
     if (!externalAudioUrl.empty()) Command({"audio-add", std::string(externalAudioUrl), "select"});
 }
+
+void MpvEngine::Stop() { Command({"stop"}); }
 
 void MpvEngine::TogglePause() { Command({"cycle", "pause"}); }
 void MpvEngine::ToggleMute() { Command({"cycle", "mute"}); }
@@ -293,11 +315,16 @@ void MpvEngine::Emit(PlaybackEvent event) const {
 }
 
 void MpvEngine::EventLoop(std::stop_token stopToken) {
+    bool playbackStarted = false;
     while (!stopToken.stop_requested()) {
         mpv_event* event = api_.WaitEvent(handle_, -1.0);
         if (stopToken.stop_requested()) break;
         if (!event) continue;
         switch (event->event_id) {
+        case MPV_EVENT_START_FILE:
+            playbackStarted = false;
+            Emit({PlaybackEventType::StartFile, {}, {}});
+            break;
         case MPV_EVENT_FILE_LOADED:
             RefreshTracks();
             Emit({PlaybackEventType::FileLoaded, {}, {}});
@@ -316,6 +343,11 @@ void MpvEngine::EventLoop(std::stop_token stopToken) {
             const auto* property = static_cast<mpv_event_property*>(event->data);
             if (!property || !property->name) break;
             if (event->reply_userdata == kTrackObserver) RefreshTracks();
+            if (event->reply_userdata == kTimeObserver && property->data &&
+                *static_cast<double*>(property->data) > 0.01 && !playbackStarted) {
+                playbackStarted = true;
+                Emit({PlaybackEventType::PlaybackStarted, {}, {}});
+            }
             Emit({PlaybackEventType::PropertyChanged, property->name, FormatMpvValue(*property)});
             break;
         }

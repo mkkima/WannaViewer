@@ -21,12 +21,17 @@ Implemented controls include:
 - redaction of Cookie, Authorization, proxy authorization, API keys, and token
   query parameters before logging;
 - rolling logs and conservative default levels;
-- no automatic browser-cookie import and no credential storage.
+- no import of Edge/Chrome user profiles or cookies; the allowlisted WebView2
+  resolver uses a separate per-resolution profile and makes a bounded best-effort
+  cleanup attempt after use;
+- WebView2 pop-ups and browser permission requests are denied, and only HTTPS
+  Kodik/Alloha embeds with an original AnimeGo/YummyAnime Referer enter this path.
 
 The project intentionally does not implement DRM/key extraction, paywall,
-authentication, CAPTCHA or anti-bot bypass, browser-cookie theft, or arbitrary
-provider script execution. Web content is never evaluated by the operating
-system shell.
+authentication, CAPTCHA or anti-bot bypass, browser-cookie theft, or private
+provider-protocol decoding. The two explicitly allowlisted provider embeds run
+their own public JavaScript inside the WebView2 browser sandbox; web content is
+never evaluated by the operating-system shell or as native application code.
 
 ## Remaining hardening work before public distribution
 

@@ -24,3 +24,11 @@ WV_TEST("logging redacts headers and query tokens") {
     WV_REQUIRE(result.find("token=abc") == std::string::npos);
     WV_REQUIRE(result.find("ok=yes") != std::string::npos);
 }
+
+WV_TEST("logging redacts opaque signed URL path segments") {
+    const std::string opaque(180, 'A');
+    const auto result = wannaviewer::RedactSecrets(
+        "Failed https://media.example.test/0/" + opaque + "/seg-1.m4s");
+    WV_REQUIRE(result.find(opaque) == std::string::npos);
+    WV_REQUIRE(result.find("https://media.example.test/0/<redacted>/seg-1.m4s") != std::string::npos);
+}

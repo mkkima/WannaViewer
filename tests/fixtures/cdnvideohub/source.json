@@ -1,0 +1,7 @@
+{
+  "unitedVideoId": 12919642479344,
+  "sources": {
+    "hlsUrl": "https://media.example.test/video.m3u8?signature=fixture",
+    "dashUrl": "https://media.example.test/video.mpd?signature=fixture"
+  }
+}

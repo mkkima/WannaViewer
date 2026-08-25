@@ -1,7 +1,10 @@
 #include "wannaviewer/resolvers/YummyAnimeResolver.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <regex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -122,10 +125,39 @@ std::string ExtractTitle(std::string_view html) {
     return std::regex_search(source, match, expression) ? match[1].str() : "Anime";
 }
 
+std::string CleanPath(const Url& url) {
+    return url.Path().substr(0, url.Path().find_first_of("?#"));
+}
+
+std::string ModernSlug(const Url& url) {
+    static constexpr std::string_view prefix = "/catalog/item/";
+    const auto path = CleanPath(url);
+    if (!path.starts_with(prefix)) return {};
+    const auto slug = path.substr(prefix.size());
+    if (slug.empty() || slug.size() > 200 ||
+        !std::ranges::all_of(slug, [](unsigned char character) {
+            return std::isalnum(character) || character == '-' || character == '_';
+        })) return {};
+    return slug;
+}
+
+std::string AbsoluteUrl(std::string value, const Url& source) {
+    if (value.starts_with("//")) return source.Scheme() + ':' + value;
+    if (value.starts_with('/')) return source.Scheme() + "://" + source.Host() + value;
+    return value;
+}
+
+bool IsSupportedProvider(const Url& url) {
+    const auto path = CleanPath(url);
+    if (url.HostIs("yummyani.me") && path == "/iframeCVH.html") return true;
+    return url.HostIs("kodikplayer.com") || url.HostIs("alloha.yani.tv");
+}
+
 } // namespace
 
 bool YummyAnimeResolver::CanHandle(const Url& url) const {
-    return url.HostIs("yummyanime.tv") || url.HostIs("yummyani.me");
+    if (!url.HostIs("yummyanime.tv") && !url.HostIs("yummyani.me")) return false;
+    return CleanPath(url) != "/iframeCVH.html";
 }
 
 ResolveResult YummyAnimeResolver::Resolve(const Url& url, const ResolveContext& context) const {
@@ -135,6 +167,32 @@ ResolveResult YummyAnimeResolver::Resolve(const Url& url, const ResolveContext& 
     if (response.status < 200 || response.status >= 300)
         return {ResolveStatus::Failed, "yummyanime", "Page returned HTTP " + std::to_string(response.status), {}};
     auto result = ParseFixture(response.body, response.finalUrl.empty() ? url.Value() : response.finalUrl);
+
+    // The modern catalog intentionally hydrates without videos. Its own public API
+    // is the stable source used by the site's lazy player when need_videos=true.
+    if (const auto slug = ModernSlug(url); !slug.empty()) {
+        try {
+            const auto endpoint = Url::Parse("https://api.yani.tv/anime/" + slug + "?need_videos=true");
+            if (endpoint) {
+                HttpRequest apiRequest{*endpoint};
+                apiRequest.headers.emplace("Accept", "application/json");
+                apiRequest.headers.emplace("Referer", url.Value());
+                apiRequest.maximumResponseBytes = 4U * 1024U * 1024U;
+                const auto apiResponse = context.http.Get(apiRequest, context.stopToken);
+                if (apiResponse.status >= 200 && apiResponse.status < 300) {
+                    auto apiResult = ParseApiFixture(apiResponse.body, url.Value());
+                    if (apiResult.status == ResolveStatus::Resolved) return apiResult;
+                    result.message = apiResult.message;
+                } else {
+                    context.logger.Write(LogLevel::Debug, "yummyanime",
+                                         "Public video API returned HTTP " + std::to_string(apiResponse.status));
+                }
+            }
+        } catch (const std::exception& error) {
+            context.logger.Write(LogLevel::Debug, "yummyanime",
+                                 std::string("Public video API failed: ") + error.what());
+        }
+    }
 
     // The legacy site exposes stable semantic provider metadata in data-params.
     // Resolve only its public controller response; provider pages remain separate resolver stages.
@@ -182,6 +240,58 @@ ResolveResult YummyAnimeResolver::Resolve(const Url& url, const ResolveContext& 
         result.resolverId = "yummyanime";
         result.message.clear();
     }
+    return result;
+}
+
+ResolveResult YummyAnimeResolver::ParseApiFixture(std::string_view json, std::string_view sourceUrl) const {
+    const auto source = Url::Parse(sourceUrl);
+    const auto document = nlohmann::json::parse(json, nullptr, false, true);
+    if (!source || document.is_discarded() || !document.is_object())
+        return {ResolveStatus::Failed, "yummyanime", "YummyAnime returned invalid video metadata", {}};
+    const auto response = document.find("response");
+    if (response == document.end() || !response->is_object())
+        return {ResolveStatus::Failed, "yummyanime", "YummyAnime video metadata has no response object", {}};
+    const auto title = StringValue(*response, {"title", "name"}, "YummyAnime");
+    const auto videos = response->find("videos");
+    if (videos == response->end() || !videos->is_array())
+        return {ResolveStatus::Unsupported, "yummyanime",
+                "YummyAnime has no public video providers for this title", {title, {}}};
+
+    ResolveResult result{ResolveStatus::Resolved, "yummyanime", {}, {title, {}}};
+    const auto seasonId = StringValue(*response, {"season"}, "default");
+    Season season{seasonId, seasonId == "default" ? "Default" : "Season " + seasonId, {}};
+    std::unordered_map<std::string, std::size_t> voiceIndexes;
+    std::vector<std::unordered_map<std::string, std::size_t>> episodeIndexes;
+    std::unordered_set<std::string> seen;
+    const HeaderMap headers{{"Referer", std::string(sourceUrl)},
+                            {"Origin", source->Scheme() + "://" + source->Host()}};
+    for (const auto& video : *videos) {
+        if (!video.is_object()) continue;
+        const auto data = video.find("data");
+        if (data == video.end() || !data->is_object()) continue;
+        auto embedUrl = AbsoluteUrl(StringValue(video, {"iframe_url"}), *source);
+        const auto embed = Url::Parse(embedUrl);
+        if (!embed || !IsSupportedProvider(*embed) || !seen.insert(embedUrl).second) continue;
+        auto voiceTitle = StringValue(*data, {"dubbing", "translation"}, "Default");
+        auto providerTitle = StringValue(*data, {"player"}, "CVH");
+        auto episodeId = StringValue(video, {"number", "episode"});
+        if (episodeId.empty()) continue;
+        auto [voicePosition, newVoice] = voiceIndexes.emplace(voiceTitle, season.voiceTracks.size());
+        if (newVoice) {
+            season.voiceTracks.push_back({voiceTitle, voiceTitle, {}});
+            episodeIndexes.emplace_back();
+        }
+        auto& voice = season.voiceTracks[voicePosition->second];
+        auto& indexes = episodeIndexes[voicePosition->second];
+        auto [episodePosition, newEpisode] = indexes.emplace(episodeId, voice.episodes.size());
+        if (newEpisode) voice.episodes.push_back({episodeId, "Episode " + episodeId, {}});
+        voice.episodes[episodePosition->second].streams.push_back(
+            {std::move(embedUrl), {}, std::move(providerTitle), {}, "embed", headers, false});
+    }
+    if (season.voiceTracks.empty())
+        return {ResolveStatus::Unsupported, "yummyanime",
+                "This title has no public CVH, Kodik, or Alloha stream supported by WannaViewer", {title, {}}};
+    result.entry.seasons.push_back(std::move(season));
     return result;
 }
 

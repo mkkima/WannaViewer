@@ -1,0 +1,33 @@
+{
+  "response": {
+    "title": "Fixture Yummy Anime",
+    "season": 2,
+    "videos": [
+      {
+        "number": "1",
+        "data": {"player": "CVH", "dubbing": "AniLiberty"},
+        "iframe_url": "//ru.yummyani.me/iframeCVH.html?dubbing_code=AniLiberty&anime_id=123&episode=1"
+      },
+      {
+        "number": "2",
+        "data": {"player": "CVH", "dubbing": "AniLiberty"},
+        "iframe_url": "//ru.yummyani.me/iframeCVH.html?dubbing_code=AniLiberty&anime_id=123&episode=2"
+      },
+      {
+        "number": "1",
+        "data": {"player": "CVH", "dubbing": "Subtitles"},
+        "iframe_url": "//ru.yummyani.me/iframeCVH.html?dubbing_code=Subtitles&anime_id=123&episode=1"
+      },
+      {
+        "number": "1",
+        "data": {"player": "Kodik", "dubbing": "AniLiberty"},
+        "iframe_url": "//kodikplayer.com/seria/1/hash/720p"
+      },
+      {
+        "number": "1",
+        "data": {"player": "Alloha", "dubbing": "AniLiberty"},
+        "iframe_url": "//alloha.yani.tv/?token=fixture"
+      }
+    ]
+  }
+}

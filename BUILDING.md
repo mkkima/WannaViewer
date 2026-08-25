@@ -20,7 +20,10 @@ The script performs these fail-fast steps:
 
 Use `-DebugBuild` for a debug build and `-SkipYtDlp` to verify that local playback
 remains functional without the helper. The package needs no registry writes,
-administrator access, codec packs, system FFmpeg, or system mpv.
+administrator access, codec packs, system FFmpeg, or system mpv. Kodik/Alloha
+resolution uses the Microsoft Edge WebView2 Evergreen Runtime; Windows 11
+normally provides it, and its absence does not affect local playback or the
+other resolvers.
 
 ## macOS Apple Silicon
 

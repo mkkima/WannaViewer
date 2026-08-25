@@ -17,7 +17,10 @@ PowerShell 7, and an internet connection for the first dependency bootstrap.
 
 The build script downloads a pinned libmpv development archive, checks its
 SHA-256 digest, builds, tests, and creates the portable directory. No codec pack
-or system mpv installation is used.
+or system mpv installation is used. Kodik/Alloha URL resolution additionally
+uses the Microsoft Edge WebView2 Evergreen Runtime normally present on Windows
+11; the portable package includes the pinned WebView2 loader, not a fixed-version
+browser runtime.
 
 Portable configuration/cache/logs are the default. Create the empty marker
 `config/use-user-config` before launch to redirect writable configuration,
@@ -33,6 +36,11 @@ A audio track, F10 statistics, Ctrl+0…4 shader presets, Esc leave fullscreen.
 Site resolution is best-effort and limited to publicly accessible metadata and
 streams. Protected/DRM media, authentication bypasses, CAPTCHA bypasses, and
 paywall circumvention are intentionally unsupported.
+
+Across the supplied YummyAnime/AnimeGo pages the menu exposes the supported CVH,
+AniBoom, Kodik, and Alloha choices each page publishes. Kodik/Alloha are resolved by running their
+own public embed in an isolated WebView2 session; no closed provider protocol is
+decoded by the application.
 
 See [BUILDING.md](BUILDING.md), [ARCHITECTURE.md](ARCHITECTURE.md), and
 [DEPENDENCIES.md](DEPENDENCIES.md) for details and verified limitations.

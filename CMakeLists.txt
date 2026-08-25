@@ -34,8 +34,12 @@ set(WANNAVIEWER_COMMON_SOURCES
   src/playback/MpvEngine.cpp
   src/playback/PlaybackStatistics.cpp
   src/rendering/ShaderManager.cpp
+  src/ui/ControlLayout.cpp
   src/network/ResolverPipeline.cpp
   src/network/YtDlpBridge.cpp
+  src/resolvers/AnimeGoResolver.cpp
+  src/resolvers/AniBoomResolver.cpp
+  src/resolvers/CdnVideoHubResolver.cpp
   src/resolvers/DirectMediaResolver.cpp
   src/resolvers/GenericResolver.cpp
   src/resolvers/YummyAnimeResolver.cpp
@@ -54,12 +58,34 @@ else()
 endif()
 
 if(WIN32)
+  FetchContent_Declare(
+    webview2_sdk
+    URL https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4129.50/microsoft.web.webview2.1.0.4129.50.nupkg
+    URL_HASH SHA256=D3934F482D484B89FB4825DF720C710664E1143A1E90F7B3A60794EF33F473D2
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  )
+  FetchContent_MakeAvailable(webview2_sdk)
+
+  set(WANNAVIEWER_WEBVIEW2_INCLUDE_DIR "${webview2_sdk_SOURCE_DIR}/build/native/include")
+  set(WANNAVIEWER_WEBVIEW2_IMPORT_LIBRARY "${webview2_sdk_SOURCE_DIR}/build/native/x64/WebView2Loader.dll.lib")
+  set(WANNAVIEWER_WEBVIEW2_LOADER "${webview2_sdk_SOURCE_DIR}/runtimes/win-x64/native/WebView2Loader.dll")
+  foreach(webview2_file IN ITEMS
+      "${WANNAVIEWER_WEBVIEW2_INCLUDE_DIR}/WebView2.h"
+      "${WANNAVIEWER_WEBVIEW2_IMPORT_LIBRARY}"
+      "${WANNAVIEWER_WEBVIEW2_LOADER}")
+    if(NOT EXISTS "${webview2_file}")
+      message(FATAL_ERROR "Pinned WebView2 SDK file is missing: ${webview2_file}")
+    endif()
+  endforeach()
+
   enable_language(RC)
   target_sources(wannaviewer_core PRIVATE
+    src/platform/windows/BrowserEmbedResolver.cpp
     src/platform/windows/HttpClientWin.cpp
     src/platform/windows/ProcessWin.cpp
   )
-  target_link_libraries(wannaviewer_core PUBLIC winhttp pathcch psapi)
+  target_include_directories(wannaviewer_core PRIVATE "${WANNAVIEWER_WEBVIEW2_INCLUDE_DIR}")
+  target_link_libraries(wannaviewer_core PUBLIC winhttp pathcch psapi "${WANNAVIEWER_WEBVIEW2_IMPORT_LIBRARY}")
 
   add_executable(WannaViewer WIN32
     src/platform/windows/Main.cpp
@@ -68,7 +94,7 @@ if(WIN32)
     resources/windows/app.manifest
   )
   set_target_properties(WannaViewer PROPERTIES OUTPUT_NAME "player")
-  target_link_libraries(WannaViewer PRIVATE wannaviewer_core comctl32 comdlg32 ole32 shell32 shlwapi dwmapi dxgi)
+  target_link_libraries(WannaViewer PRIVATE wannaviewer_core comctl32 comdlg32 ole32 shell32 shlwapi dwmapi dxgi uxtheme gdiplus)
   target_compile_options(WannaViewer PRIVATE /W4 /WX /permissive- /EHsc /utf-8 /Zc:__cplusplus /sdl /guard:cf)
   target_link_options(WannaViewer PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf)
 
@@ -80,6 +106,9 @@ if(WIN32)
   else()
     message(FATAL_ERROR "libmpv-2.dll is missing under ${WANNAVIEWER_MPV_ROOT}; run scripts/bootstrap-mpv.ps1")
   endif()
+  add_custom_command(TARGET WannaViewer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${WANNAVIEWER_WEBVIEW2_LOADER}" "$<TARGET_FILE_DIR:WannaViewer>/WebView2Loader.dll"
+  )
 elseif(APPLE)
   enable_language(OBJCXX)
   target_sources(wannaviewer_core PRIVATE
@@ -120,6 +149,7 @@ if(WANNAVIEWER_BUILD_TESTS)
   add_executable(wannaviewer_tests
     tests/TestMain.cpp
     tests/ConfigTests.cpp
+    tests/ControlLayoutTests.cpp
     tests/ResolverTests.cpp
     tests/SecurityTests.cpp
     tests/ShaderManagerTests.cpp
@@ -134,6 +164,6 @@ endif()
 
 install(TARGETS WannaViewer RUNTIME DESTINATION . BUNDLE DESTINATION .)
 if(WIN32)
-  install(FILES "${WANNAVIEWER_MPV_DLL}" DESTINATION .)
+  install(FILES "${WANNAVIEWER_MPV_DLL}" "${WANNAVIEWER_WEBVIEW2_LOADER}" DESTINATION .)
 endif()
 install(DIRECTORY config shaders presets resolvers DESTINATION .)

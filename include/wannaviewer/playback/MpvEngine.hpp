@@ -16,7 +16,16 @@
 
 namespace wannaviewer {
 
-enum class PlaybackEventType { FileLoaded, EndFile, TracksChanged, VideoReconfigured, PropertyChanged, Error };
+enum class PlaybackEventType {
+    StartFile,
+    FileLoaded,
+    PlaybackStarted,
+    EndFile,
+    TracksChanged,
+    VideoReconfigured,
+    PropertyChanged,
+    Error
+};
 
 struct PlaybackEvent final {
     PlaybackEventType type{PlaybackEventType::PropertyChanged};
@@ -51,6 +60,7 @@ public:
 
     void Open(std::string_view pathOrUrl, const std::vector<std::pair<std::string, std::string>>& headers = {},
               std::string_view externalAudioUrl = {});
+    void Stop();
     void TogglePause();
     void ToggleMute();
     void SeekRelative(double seconds);

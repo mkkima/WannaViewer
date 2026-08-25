@@ -5,12 +5,12 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $projectRoot "build\windows-x64-$Configuration\bin"
 $destination = Join-Path $projectRoot 'dist\windows-x64'
-foreach ($required in @('player.exe','libmpv-2.dll')) {
+foreach ($required in @('player.exe','libmpv-2.dll','WebView2Loader.dll')) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $required))) { throw "Missing package input: $required" }
 }
 if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $destination | Out-Null
-foreach ($file in @('player.exe','libmpv-2.dll')) {
+foreach ($file in @('player.exe','libmpv-2.dll','WebView2Loader.dll')) {
     Copy-Item -LiteralPath (Join-Path $source $file) -Destination (Join-Path $destination $file) -Force
 }
 foreach ($asset in @('config','presets','resolvers','shaders')) {

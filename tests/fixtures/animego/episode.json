@@ -1,0 +1,7 @@
+{
+  "status": "success",
+  "data": {
+    "numVideos": 3,
+    "content": "<button data-anime-player-target=\"provider\" data-player=\"//animego.me/cdn-iframe/54703/Jam%20Club/3/1\" data-provider-title=\"CVH\" data-translation-title=\"JAM CLUB\"></button><button data-anime-player-target=\"provider\" data-player=\"//aniboom.one/embed/example?episode=1&amp;translation=16\" data-provider-title=\"AniBoom\" data-translation-title=\"JAM CLUB\"></button><button data-anime-player-target=\"provider\" data-player=\"//kodikplayer.com/seria/1/hash/720p\" data-provider-title=\"Kodik\" data-translation-title=\"JAM CLUB\"></button>"
+  }
+}

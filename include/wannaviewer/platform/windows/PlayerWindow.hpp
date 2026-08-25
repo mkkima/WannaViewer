@@ -53,6 +53,7 @@ private:
     void SetMediaLoaded(bool loaded);
     void ShowControls(bool show);
     void RecordInteraction();
+    [[nodiscard]] bool IsCursorOverControls() const noexcept;
     void UpdateActiveTimer();
     void UpdateUi();
     void UpdateTracks();

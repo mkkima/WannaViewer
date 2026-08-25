@@ -38,6 +38,7 @@ constexpr UINT kResolverMessage = WM_APP + 2;
 constexpr UINT kInteractionMessage = WM_APP + 3;
 constexpr UINT kTimelineHoverMessage = WM_APP + 4;
 constexpr UINT_PTR kUiTimer = 1;
+constexpr ULONGLONG kControlsHideDelayMs = 1500;
 constexpr wchar_t kHoverProperty[] = L"WannaViewer.Hovered";
 constexpr int kPlay = 100;
 constexpr int kTimeline = 101;
@@ -651,11 +652,7 @@ void PlayerWindow::LayoutControls() {
         rectangle.height -= amount * 2;
         return rectangle;
     };
-    auto videoRectangle = layout.video;
-    if (layout.bar.visible)
-        videoRectangle.height = std::max(0, std::min(videoRectangle.height,
-            layout.bar.y + Scale(18) - videoRectangle.y));
-    place(video_, videoRectangle);
+    place(video_, layout.video);
     place(controlsBar_, layout.bar);
     place(timeline_, layout.timeline);
     place(timeLabel_, layout.time);
@@ -766,6 +763,14 @@ void PlayerWindow::RecordInteraction() {
     lastInteraction_ = GetTickCount64();
     ShowControls(true);
     UpdateActiveTimer();
+}
+
+bool PlayerWindow::IsCursorOverControls() const noexcept {
+    if (!controlsBar_ || !IsWindowVisible(controlsBar_)) return false;
+    POINT cursor{};
+    RECT controls{};
+    return GetCursorPos(&cursor) && GetWindowRect(controlsBar_, &controls) &&
+           PtInRect(&controls, cursor) != FALSE;
 }
 
 void PlayerWindow::UpdateActiveTimer() {
@@ -1849,8 +1854,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_TIMER:
         if (wParam == kUiTimer) {
             UpdateUi();
-            if (mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None && !timelineDragging_ &&
-                GetTickCount64() - lastInteraction_ >= 3000)
+            if (mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None &&
+                !timelineDragging_ && !IsCursorOverControls() &&
+                GetTickCount64() - lastInteraction_ >= kControlsHideDelayMs)
                 ShowControls(false);
         }
         return 0;

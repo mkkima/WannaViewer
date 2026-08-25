@@ -18,6 +18,8 @@ using System.Text;
 using System.Runtime.InteropServices;
 public static class WannaViewerUrlSmokeNative {
     public delegate bool EnumProcedure(IntPtr window, IntPtr data);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProcedure callback, IntPtr data);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder text, int count);
@@ -29,6 +31,9 @@ public static class WannaViewerUrlSmokeNative {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")]
     public static extern IntPtr SendMessageText(IntPtr window, uint message, IntPtr wParam, StringBuilder text);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr value);
 
@@ -120,6 +125,8 @@ function Get-AllSourceLabels([IntPtr]$Window) {
 
 $playerPath = (Resolve-Path -LiteralPath $Player).Path
 foreach ($url in $Urls) {
+    $cursorBefore = [WannaViewerUrlSmokeNative+POINT]::new()
+    [void][WannaViewerUrlSmokeNative]::GetCursorPos([ref]$cursorBefore)
     $start = [Diagnostics.ProcessStartInfo]::new($playerPath)
     $start.UseShellExecute = $false
     $start.ArgumentList.Add($url)
@@ -219,6 +226,42 @@ foreach ($url in $Urls) {
                     throw 'Embedded playback settings did not close'
                 }
                 Write-Host 'Playback settings stayed inside the player.'
+
+                $controlsBar = Get-Control $window 113
+                $barRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                if (-not [WannaViewerUrlSmokeNative]::GetWindowRect($controlsBar, [ref]$barRectangle)) {
+                    throw 'Unable to read the playback controls rectangle'
+                }
+                [void][WannaViewerUrlSmokeNative]::SetCursorPos(
+                    [int](($barRectangle.Left + $barRectangle.Right) / 2),
+                    [int](($barRectangle.Top + $barRectangle.Bottom) / 2))
+                Start-Sleep -Milliseconds 2200
+                if (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
+                    throw 'Playback controls hid while the cursor was inside the controls overlay'
+                }
+
+                $windowRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                if (-not [WannaViewerUrlSmokeNative]::GetWindowRect($window, [ref]$windowRectangle)) {
+                    throw 'Unable to read the player window rectangle'
+                }
+                [void][WannaViewerUrlSmokeNative]::SetCursorPos(
+                    [int](($windowRectangle.Left + $windowRectangle.Right) / 2),
+                    $windowRectangle.Top + 80)
+                # Ensure the inactivity interval starts after leaving the overlay even on
+                # headless/remote desktops that occasionally coalesce cursor messages.
+                [void][WannaViewerUrlSmokeNative]::SendMessage(
+                    $window, 0x0200, [IntPtr]::Zero, [IntPtr]::Zero)
+                $controlsHideDeadline = [DateTime]::UtcNow.AddSeconds(3)
+                do {
+                    Start-Sleep -Milliseconds 50
+                } while ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar) -and
+                         [DateTime]::UtcNow -lt $controlsHideDeadline)
+                if ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
+                    $cursorNow = [WannaViewerUrlSmokeNative+POINT]::new()
+                    [void][WannaViewerUrlSmokeNative]::GetCursorPos([ref]$cursorNow)
+                    throw "Playback controls did not hide promptly after the cursor left the overlay; cursor=$($cursorNow.X),$($cursorNow.Y) bar=$($barRectangle.Left),$($barRectangle.Top),$($barRectangle.Right),$($barRectangle.Bottom)"
+                }
+                Write-Host 'Playback controls remain under the cursor and hide promptly after it leaves.'
             }
         }
         if ((Find-ProcessWindow $process.Id '#32768') -ne [IntPtr]::Zero) {
@@ -235,6 +278,7 @@ foreach ($url in $Urls) {
         if (-not $process.WaitForExit(10000)) { throw 'Player did not close cleanly' }
         if ($process.ExitCode -ne 0) { throw "Player exited with code $($process.ExitCode)" }
     } finally {
+        [void][WannaViewerUrlSmokeNative]::SetCursorPos($cursorBefore.X, $cursorBefore.Y)
         if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }
 }

@@ -29,17 +29,17 @@ ControlLayout ComputeControlLayout(int clientWidth, int clientHeight, unsigned d
 
     result.frame = {0, 0, clientWidth, clientHeight, true};
     result.video = result.frame;
-    const int barHeight = controlsVisible ? s(result.compact ? 116 : 126) : 0;
+    const int barHeight = controlsVisible ? s(result.compact ? 82 : 88) : 0;
     const int controlsTop = std::max(result.frame.y, result.frame.Bottom() - barHeight);
     result.bar = {result.frame.x, controlsTop, result.frame.width, barHeight, controlsVisible};
 
-    const int padding = s(result.compact ? 14 : 20);
-    const int gap = s(result.compact ? 4 : 6);
-    result.timeline = {result.bar.x + padding, result.bar.y + s(2),
-                       std::max(0, result.bar.width - padding * 2), s(48), controlsVisible};
+    const int padding = s(result.compact ? 12 : 16);
+    const int gap = s(result.compact ? 3 : 5);
+    result.timeline = {result.bar.x + padding, result.bar.y,
+                       std::max(0, result.bar.width - padding * 2), s(34), controlsVisible};
 
-    const int rowY = result.bar.y + s(result.compact ? 58 : 64);
-    const int buttonSize = s(result.compact ? 40 : 44);
+    const int rowY = result.bar.y + s(result.compact ? 36 : 40);
+    const int buttonSize = s(result.compact ? 34 : 38);
     int left = result.bar.x + padding;
     const auto takeLeft = [&]() {
         const Rect rectangle{left, rowY, buttonSize, buttonSize, controlsVisible};
@@ -51,9 +51,9 @@ ControlLayout ComputeControlLayout(int clientWidth, int clientHeight, unsigned d
     result.forward = takeLeft();
     result.mute = takeLeft();
     const bool showVolume = controlsVisible && !result.compact;
-    result.volume = {left + s(2), rowY + s(10), showVolume ? s(80) : 0, s(24), showVolume};
+    result.volume = {left + s(2), rowY + s(7), showVolume ? s(72) : 0, s(22), showVolume};
     if (showVolume) left = result.volume.Right() + gap;
-    const int timeWidth = s(result.compact ? 108 : 134);
+    const int timeWidth = s(result.compact ? 100 : 122);
     result.time = {left + s(2), rowY, timeWidth, buttonSize, controlsVisible};
 
     int right = result.bar.Right() - padding;

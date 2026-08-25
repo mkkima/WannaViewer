@@ -68,6 +68,18 @@ WV_TEST("hidden controls return the full client area to video") {
     WV_REQUIRE(!layout.timeline.visible);
 }
 
+WV_TEST("playback controls overlay without resizing the video surface") {
+    const auto visible = wannaviewer::ui::ComputeControlLayout(1280, 720, 96, true);
+    const auto hidden = wannaviewer::ui::ComputeControlLayout(1280, 720, 96, false);
+    WV_REQUIRE(visible.video.x == hidden.video.x);
+    WV_REQUIRE(visible.video.y == hidden.video.y);
+    WV_REQUIRE(visible.video.width == hidden.video.width);
+    WV_REQUIRE(visible.video.height == hidden.video.height);
+    WV_REQUIRE(visible.bar.visible);
+    WV_REQUIRE(visible.bar.height <= 88);
+    WV_REQUIRE(visible.bar.Bottom() == visible.video.Bottom());
+}
+
 WV_TEST("embedded overlays remain bounded for choice input and message content") {
     for (const auto content : {wannaviewer::ui::OverlayContent::Choice,
                                wannaviewer::ui::OverlayContent::Input,

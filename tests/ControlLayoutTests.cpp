@@ -54,8 +54,14 @@ WV_TEST("control layout remains bounded and non-overlapping across DPI modes") {
 
 WV_TEST("hidden controls return the full client area to video") {
     const auto layout = wannaviewer::ui::ComputeControlLayout(1280, 720, 96, false);
-    WV_REQUIRE(layout.frame.width < 1280);
-    WV_REQUIRE(layout.frame.height < 720);
+    WV_REQUIRE(layout.frame.x == 0);
+    WV_REQUIRE(layout.frame.y == 0);
+    WV_REQUIRE(layout.frame.width == 1280);
+    WV_REQUIRE(layout.frame.height == 720);
+    WV_REQUIRE(layout.video.x == 0);
+    WV_REQUIRE(layout.video.y == 0);
+    WV_REQUIRE(layout.video.width == 1280);
+    WV_REQUIRE(layout.video.height == 720);
     WV_REQUIRE(Inside(layout.video, layout.frame));
     WV_REQUIRE(!layout.bar.visible);
     WV_REQUIRE(!layout.play.visible);

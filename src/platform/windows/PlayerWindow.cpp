@@ -38,6 +38,7 @@ constexpr UINT kResolverMessage = WM_APP + 2;
 constexpr UINT kInteractionMessage = WM_APP + 3;
 constexpr UINT kTimelineHoverMessage = WM_APP + 4;
 constexpr UINT_PTR kUiTimer = 1;
+constexpr wchar_t kHoverProperty[] = L"WannaViewer.Hovered";
 constexpr int kPlay = 100;
 constexpr int kTimeline = 101;
 constexpr int kVolume = 102;
@@ -53,7 +54,6 @@ constexpr int kOpenFile = 111;
 constexpr int kOpenUrl = 112;
 constexpr int kControlsBar = 113;
 constexpr int kEmptyState = 114;
-constexpr int kVideoFrame = 115;
 constexpr int kRewind = 116;
 constexpr int kForward = 117;
 constexpr int kSourcePanel = 130;
@@ -262,11 +262,18 @@ LRESULT CALLBACK VideoSubclass(HWND window, UINT message, WPARAM wParam, LPARAM 
 LRESULT CALLBACK InteractionSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
                                      UINT_PTR, DWORD_PTR reference) {
     if (message == WM_MOUSEMOVE) {
-        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
-        TrackMouseEvent(&tracking);
-        InvalidateRect(window, nullptr, FALSE);
+        if (!GetPropW(window, kHoverProperty)) {
+            (void)SetPropW(window, kHoverProperty,
+                           reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+            TrackMouseEvent(&tracking);
+            InvalidateRect(window, nullptr, FALSE);
+        }
     } else if (message == WM_MOUSELEAVE) {
+        RemovePropW(window, kHoverProperty);
         InvalidateRect(window, nullptr, FALSE);
+    } else if (message == WM_NCDESTROY) {
+        RemovePropW(window, kHoverProperty);
     }
     if (GetDlgCtrlID(window) == kTimeline) {
         if (message == WM_MOUSEMOVE)
@@ -433,13 +440,9 @@ void PlayerWindow::CreateControls() {
     backgroundBrush_ = CreateSolidBrush(kWindowColor);
     panelBrush_ = CreateSolidBrush(kPanelColor);
     statisticsBrush_ = CreateSolidBrush(kStatisticsColor);
-    videoFrame_ = CreateWindowExW(WS_EX_TRANSPARENT, L"STATIC", nullptr,
-                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_OWNERDRAW,
-                                  0, 0, 100, 100, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kVideoFrame)), instance_, nullptr);
     video_ = CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_LEFT,
                              0, 0, 100, 100, window_, nullptr, instance_, nullptr);
     SetWindowSubclass(video_, VideoSubclass, 1, reinterpret_cast<DWORD_PTR>(window_));
-    SetWindowSubclass(videoFrame_, VideoSubclass, 1, reinterpret_cast<DWORD_PTR>(window_));
     controlsBar_ = CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_OWNERDRAW,
                                    0, 0, 100, 96, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlsBar)), instance_, nullptr);
     const auto createButton = [this](int id, const wchar_t* text) {
@@ -648,7 +651,6 @@ void PlayerWindow::LayoutControls() {
         rectangle.height -= amount * 2;
         return rectangle;
     };
-    place(videoFrame_, layout.frame);
     auto videoRectangle = layout.video;
     if (layout.bar.visible)
         videoRectangle.height = std::max(0, std::min(videoRectangle.height,
@@ -720,7 +722,6 @@ void PlayerWindow::LayoutControls() {
     ShowWindow(stats_, statisticsRect.visible ? SW_SHOWNA : SW_HIDE);
 
     SetWindowPos(video_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    SetWindowPos(videoFrame_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     for (HWND control : {controlsBar_, emptyState_, openFileButton_, openUrlButton_, playButton_, rewindButton_,
                          forwardButton_, muteButton_, timeline_,
                          timeLabel_, volume_, audio_, subtitles_, videoQuality_, shader_, statsButton_, fullscreenButton_,
@@ -1644,12 +1645,6 @@ LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
         }
         return TRUE;
     }
-    if (item.CtlID == kVideoFrame) {
-        RECT frame = rectangle;
-        InflateRect(&frame, -1, -1);
-        StrokeRoundedRectangle(item.hDC, frame, kBorderColor, Scale(36));
-        return TRUE;
-    }
     if (item.CtlID == kControlsBar) {
         FillRect(item.hDC, &rectangle, backgroundBrush_);
         FillRoundedRectangle(item.hDC, rectangle, kPanelColor, Scale(36));
@@ -1711,10 +1706,7 @@ LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
 
     const bool enabled = (item.itemState & ODS_DISABLED) == 0;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
-    POINT cursor{};
-    GetCursorPos(&cursor);
-    ScreenToClient(item.hwndItem, &cursor);
-    const bool hot = PtInRect(&rectangle, cursor) != FALSE;
+    const bool hot = GetPropW(item.hwndItem, kHoverProperty) != nullptr;
     const bool chrome = item.CtlID == kPlay || item.CtlID == kRewind || item.CtlID == kForward ||
                         item.CtlID == kMute || item.CtlID == kAudio || item.CtlID == kSubtitles ||
                         item.CtlID == kVideoQuality || item.CtlID == kShader || item.CtlID == kStatistics ||

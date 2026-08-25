@@ -80,6 +80,9 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         SetRequiredOption("idle", "yes");
         SetRequiredOption("keep-open", "yes");
         SetRequiredOption("background-color", "#090c11");
+        // Fill the video surface while preserving the source aspect ratio.
+        // mpv crops only the overflow instead of adding pillarbox/letterbox bars.
+        SetRequiredOption("panscan", "1.0");
         SetRequiredOption("vo", "gpu-next");
         SetRequiredOption("hwdec", config_.GetString("playback.hwdec", "auto"));
         SetRequiredOption("interpolation", "no");

@@ -80,11 +80,11 @@ try {
         return $true
     }
     [void][WannaViewerEmptySmokeNative]::EnumChildWindows($main, $childCallback, [IntPtr]::Zero)
-    foreach ($id in @(100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,
+    foreach ($id in @(100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,116,117,
                       150,151,152,153,154,155,156)) {
         if (-not $controls.ContainsKey($id)) { throw "Expected control $id is missing" }
     }
-    foreach ($id in @(111,112,114,115)) {
+    foreach ($id in @(111,112,114)) {
         if (-not [WannaViewerEmptySmokeNative]::IsWindowVisible($controls[$id])) { throw "Expected empty-state control $id is hidden" }
         $rect = [WannaViewerEmptySmokeNative+RECT]::new()
         [void][WannaViewerEmptySmokeNative]::GetWindowRect($controls[$id], [ref]$rect)
@@ -93,7 +93,7 @@ try {
             throw "Control $id extends outside the player window"
         }
     }
-    foreach ($id in @(111,112,114,115)) { Assert-NoBinaryRegion $controls[$id] "Empty-state control $id" }
+    foreach ($id in @(111,112,114)) { Assert-NoBinaryRegion $controls[$id] "Empty-state control $id" }
     foreach ($id in @(100,101,102,103,104,105,106,107,108,109,110,113,116,117,150,151,152,153,154,155,156)) {
         if ([WannaViewerEmptySmokeNative]::IsWindowVisible($controls[$id])) { throw "Control $id should be hidden on the empty state" }
     }

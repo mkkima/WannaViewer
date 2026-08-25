@@ -106,7 +106,6 @@ private:
 
     HINSTANCE instance_{nullptr};
     HWND window_{nullptr};
-    HWND videoFrame_{nullptr};
     HWND video_{nullptr};
     HWND controlsBar_{nullptr};
     HWND playButton_{nullptr};

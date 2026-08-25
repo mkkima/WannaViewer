@@ -27,15 +27,11 @@ ControlLayout ComputeControlLayout(int clientWidth, int clientHeight, unsigned d
     const auto s = [dpi](int value) { return Scaled(value, dpi); };
     result.compact = clientWidth < s(1040);
 
-    const int outer = s(result.compact ? 10 : 16);
-    result.frame = {outer, outer, std::max(0, clientWidth - outer * 2),
-                    std::max(0, clientHeight - outer * 2), true};
-    result.video = {result.frame.x + s(2), result.frame.y + s(2),
-                    std::max(0, result.frame.width - s(4)), std::max(0, result.frame.height - s(4)), true};
+    result.frame = {0, 0, clientWidth, clientHeight, true};
+    result.video = result.frame;
     const int barHeight = controlsVisible ? s(result.compact ? 116 : 126) : 0;
-    const int controlsTop = std::max(result.frame.y + s(2), result.frame.Bottom() - s(2) - barHeight);
-    result.bar = {result.frame.x + s(2), controlsTop, std::max(0, result.frame.width - s(4)),
-                  barHeight, controlsVisible};
+    const int controlsTop = std::max(result.frame.y, result.frame.Bottom() - barHeight);
+    result.bar = {result.frame.x, controlsTop, result.frame.width, barHeight, controlsVisible};
 
     const int padding = s(result.compact ? 14 : 20);
     const int gap = s(result.compact ? 4 : 6);

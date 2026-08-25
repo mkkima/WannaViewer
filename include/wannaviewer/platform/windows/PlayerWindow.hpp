@@ -53,6 +53,7 @@ private:
     void SetMediaLoaded(bool loaded);
     void ShowControls(bool show);
     void RecordInteraction();
+    void RecordMouseMovement();
     [[nodiscard]] bool IsCursorOverControls() const noexcept;
     void UpdateActiveTimer();
     void UpdateUi();
@@ -178,6 +179,7 @@ private:
     WINDOWPLACEMENT previousPlacement_{sizeof(WINDOWPLACEMENT)};
     DWORD previousStyle_{0};
     ULONGLONG lastInteraction_{0};
+    POINT lastMousePosition_{};
     unsigned timerTick_{0};
     unsigned benchmarkTick_{0};
     unsigned dpi_{96};
@@ -185,6 +187,7 @@ private:
     int audioSelection_{-1};
     int subtitleSelection_{0};
     int videoSelection_{-1};
+    bool hasLastMousePosition_{false};
     bool controlsVisible_{true};
     bool statisticsVisible_{false};
     bool mediaLoaded_{false};

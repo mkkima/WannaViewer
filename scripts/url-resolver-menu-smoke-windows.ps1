@@ -261,7 +261,32 @@ foreach ($url in $Urls) {
                     [void][WannaViewerUrlSmokeNative]::GetCursorPos([ref]$cursorNow)
                     throw "Playback controls did not hide promptly after the cursor left the overlay; cursor=$($cursorNow.X),$($cursorNow.Y) bar=$($barRectangle.Left),$($barRectangle.Top),$($barRectangle.Right),$($barRectangle.Bottom)"
                 }
-                Write-Host 'Playback controls remain under the cursor and hide promptly after it leaves.'
+
+                # Hiding changes the child window under the cursor. Windows may emit a
+                # synthetic WM_MOUSEMOVE for that transition even though the cursor did
+                # not move; the controls must not reappear and start blinking.
+                $stableHiddenDeadline = [DateTime]::UtcNow.AddSeconds(2)
+                do {
+                    Start-Sleep -Milliseconds 25
+                    if ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
+                        throw 'Playback controls reappeared without actual cursor movement'
+                    }
+                } while ([DateTime]::UtcNow -lt $stableHiddenDeadline)
+
+                [void][WannaViewerUrlSmokeNative]::SetCursorPos(
+                    [int](($windowRectangle.Left + $windowRectangle.Right) / 2) + 40,
+                    $windowRectangle.Top + 80)
+                [void][WannaViewerUrlSmokeNative]::SendMessage(
+                    $window, 0x0200, [IntPtr]::Zero, [IntPtr]::Zero)
+                $controlsShowDeadline = [DateTime]::UtcNow.AddSeconds(1)
+                do {
+                    Start-Sleep -Milliseconds 25
+                } while (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar) -and
+                         [DateTime]::UtcNow -lt $controlsShowDeadline)
+                if (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
+                    throw 'Playback controls did not reappear after actual cursor movement'
+                }
+                Write-Host 'Playback controls stay hidden without movement and reappear after real movement.'
             }
         }
         if ((Find-ProcessWindow $process.Id '#32768') -ne [IntPtr]::Zero) {

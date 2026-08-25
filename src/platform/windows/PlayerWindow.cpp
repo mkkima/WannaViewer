@@ -284,7 +284,8 @@ LRESULT CALLBACK InteractionSubclass(HWND window, UINT message, WPARAM wParam, L
     }
     if (message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_POINTERDOWN ||
         message == WM_POINTERUPDATE || message == WM_SETFOCUS)
-        PostMessageW(reinterpret_cast<HWND>(reference), kInteractionMessage, 0, 0);
+        PostMessageW(reinterpret_cast<HWND>(reference), kInteractionMessage,
+                     message == WM_MOUSEMOVE ? TRUE : FALSE, 0);
     return DefSubclassProc(window, message, wParam, lParam);
 }
 
@@ -753,6 +754,13 @@ void PlayerWindow::SetMediaLoaded(bool loaded) {
 void PlayerWindow::ShowControls(bool show) {
     if (!show && (sourceSelection_ || overlayMode_ != OverlayMode::None)) return;
     if (controlsVisible_ == show) return;
+    if (!show) {
+        POINT cursor{};
+        if (GetCursorPos(&cursor)) {
+            lastMousePosition_ = cursor;
+            hasLastMousePosition_ = true;
+        }
+    }
     controlsVisible_ = show;
     LayoutControls();
     if (!show) SetFocus(window_);
@@ -763,6 +771,19 @@ void PlayerWindow::RecordInteraction() {
     lastInteraction_ = GetTickCount64();
     ShowControls(true);
     UpdateActiveTimer();
+}
+
+void PlayerWindow::RecordMouseMovement() {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) {
+        RecordInteraction();
+        return;
+    }
+    if (hasLastMousePosition_ && cursor.x == lastMousePosition_.x && cursor.y == lastMousePosition_.y)
+        return;
+    lastMousePosition_ = cursor;
+    hasLastMousePosition_ = true;
+    RecordInteraction();
 }
 
 bool PlayerWindow::IsCursorOverControls() const noexcept {
@@ -1837,6 +1858,8 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         LayoutControls();
         return 0;
     case WM_MOUSEMOVE:
+        RecordMouseMovement();
+        return 0;
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
     case WM_POINTERDOWN:
@@ -1844,7 +1867,10 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         RecordInteraction();
         return 0;
     case kInteractionMessage:
-        RecordInteraction();
+        if (wParam != FALSE)
+            RecordMouseMovement();
+        else
+            RecordInteraction();
         return 0;
     case kTimelineHoverMessage:
         timelineHovering_ = wParam != FALSE;

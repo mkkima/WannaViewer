@@ -36,6 +36,7 @@ public static class WannaViewerUrlSmokeNative {
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
     [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint parameter, out int value, uint flags);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr value);
@@ -211,6 +212,75 @@ foreach ($url in $Urls) {
                 }
                 $selectorClosedByPlayback = $true
                 Write-Host 'Embedded selector opened CVH and playback time advanced.'
+
+                $timeline = Get-Control $window 101
+                $playbackWindowRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                if (-not [WannaViewerUrlSmokeNative]::GetWindowRect($window, [ref]$playbackWindowRectangle)) {
+                    throw 'Unable to read the player window before testing the timeline'
+                }
+                [void][WannaViewerUrlSmokeNative]::SetCursorPos(
+                    [int](($playbackWindowRectangle.Left + $playbackWindowRectangle.Right) / 2),
+                    $playbackWindowRectangle.Top + 80)
+                [void][WannaViewerUrlSmokeNative]::SendMessage(
+                    $window, 0x0200, [IntPtr]::Zero, [IntPtr]::Zero)
+                $timelineVisibleDeadline = [DateTime]::UtcNow.AddSeconds(1)
+                do {
+                    Start-Sleep -Milliseconds 20
+                } while (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($timeline) -and
+                         [DateTime]::UtcNow -lt $timelineVisibleDeadline)
+                if (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($timeline)) {
+                    throw 'Playback timeline did not appear for pointer interaction'
+                }
+                # The chrome slides into place after it becomes visible. Read the hit target only
+                # after that transition, otherwise the real cursor can click its previous Y position.
+                if ($clientAnimationsEnabled) { Start-Sleep -Milliseconds 220 }
+                $timelineRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                if (-not [WannaViewerUrlSmokeNative]::GetWindowRect($timeline, [ref]$timelineRectangle)) {
+                    throw 'Unable to read the playback timeline rectangle'
+                }
+                $timelineWidth = $timelineRectangle.Right - $timelineRectangle.Left
+                $timelineHeight = $timelineRectangle.Bottom - $timelineRectangle.Top
+                if ($timelineWidth -lt 100 -or $timelineHeight -lt 20) {
+                    throw "Playback timeline hit target is unexpectedly small: ${timelineWidth}x${timelineHeight}"
+                }
+                $timelineY = [int]($timelineHeight / 2)
+                $startX = [int]($timelineWidth * 0.40)
+                $targetX = [int]($timelineWidth * 0.75)
+                [void][WannaViewerUrlSmokeNative]::SetForegroundWindow($window)
+                [void][WannaViewerUrlSmokeNative]::SetCursorPos(
+                    $timelineRectangle.Left + $startX, $timelineRectangle.Top + $timelineY)
+                Start-Sleep -Milliseconds 50
+                $timelineMouseDown = $false
+                try {
+                    [WannaViewerUrlSmokeNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                    $timelineMouseDown = $true
+                    Start-Sleep -Milliseconds 50
+                    $positionAfterClick = [WannaViewerUrlSmokeNative]::SendMessage(
+                        $timeline, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+                    if ($positionAfterClick -lt 3700 -or $positionAfterClick -gt 4300) {
+                        throw "Timeline click did not jump under the pointer: position=$positionAfterClick"
+                    }
+                    [void][WannaViewerUrlSmokeNative]::SetCursorPos(
+                        $timelineRectangle.Left + $targetX, $timelineRectangle.Top + $timelineY)
+                    Start-Sleep -Milliseconds 50
+                    $positionDuringDrag = [WannaViewerUrlSmokeNative]::SendMessage(
+                        $timeline, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+                    if ($positionDuringDrag -lt 7200 -or $positionDuringDrag -gt 7800) {
+                        throw "Timeline drag did not track the pointer: position=$positionDuringDrag"
+                    }
+                } finally {
+                    if ($timelineMouseDown) {
+                        [WannaViewerUrlSmokeNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+                    }
+                }
+                Start-Sleep -Milliseconds 2200
+                $positionAfterSeek = [WannaViewerUrlSmokeNative]::SendMessage(
+                    $timeline, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+                if ($positionAfterSeek -lt 6800 -or $positionAfterSeek -gt 8200) {
+                    throw "Timeline seek did not reach the selected playback range: position=$positionAfterSeek"
+                }
+                Write-Host 'Timeline click, drag preview, and committed seek reached the pointer position.'
+
                 [void][WannaViewerUrlSmokeNative]::SendMessage($window, 0x0111, [IntPtr]107, [IntPtr]::Zero)
                 $settingsDeadline = [DateTime]::UtcNow.AddSeconds(5)
                 $settingsPanel = Get-Control $window 150

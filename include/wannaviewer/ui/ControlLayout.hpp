@@ -69,6 +69,8 @@ struct SourceSelectorLayout final {
 
 [[nodiscard]] ControlLayout ComputeControlLayout(int clientWidth, int clientHeight,
                                                   unsigned dpi, bool controlsVisible);
+[[nodiscard]] int TimelineValueFromPoint(int x, int channelLeft, int channelRight,
+                                         int minimum, int maximum) noexcept;
 [[nodiscard]] SourceSelectorLayout ComputeSourceSelectorLayout(int clientWidth, int contentHeight,
                                                                 unsigned dpi, bool visible);
 [[nodiscard]] OverlayLayout ComputeOverlayLayout(int clientWidth, int clientHeight, unsigned dpi,

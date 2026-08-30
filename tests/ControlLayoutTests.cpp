@@ -80,6 +80,16 @@ WV_TEST("playback controls overlay without resizing the video surface") {
     WV_REQUIRE(visible.bar.Bottom() == visible.video.Bottom());
 }
 
+WV_TEST("timeline pointer mapping is exact and clamps outside the channel") {
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(-100, 10, 1010, 0, 10000) == 0);
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(10, 10, 1010, 0, 10000) == 0);
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(510, 10, 1010, 0, 10000) == 5000);
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(1010, 10, 1010, 0, 10000) == 10000);
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(5000, 10, 1010, 0, 10000) == 10000);
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(50, 20, 20, 3, 9) == 3);
+    WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(50, 0, 100, 9, 3) == 9);
+}
+
 WV_TEST("embedded overlays remain bounded for choice input and message content") {
     for (const auto content : {wannaviewer::ui::OverlayContent::Choice,
                                wannaviewer::ui::OverlayContent::Input,

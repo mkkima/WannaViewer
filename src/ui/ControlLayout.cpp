@@ -80,6 +80,15 @@ ControlLayout ComputeControlLayout(int clientWidth, int clientHeight, unsigned d
     return result;
 }
 
+int TimelineValueFromPoint(int x, int channelLeft, int channelRight,
+                           int minimum, int maximum) noexcept {
+    if (maximum <= minimum || channelRight <= channelLeft) return minimum;
+    const int clamped = std::clamp(x, channelLeft, channelRight) - channelLeft;
+    const long long width = static_cast<long long>(channelRight - channelLeft);
+    const long long range = static_cast<long long>(maximum) - minimum;
+    return minimum + static_cast<int>((range * clamped + width / 2) / width);
+}
+
 SourceSelectorLayout ComputeSourceSelectorLayout(int clientWidth, int contentHeight,
                                                   unsigned dpi, bool visible) {
     SourceSelectorLayout result;

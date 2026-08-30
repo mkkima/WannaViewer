@@ -54,6 +54,12 @@ private:
     void ShowControls(bool show);
     void UpdateControlsAnimation(ULONGLONG now);
     [[nodiscard]] bool ControlsAnimationActive() const noexcept;
+    void UpdateTimelineFromPoint(int clientX, bool commit);
+    void UpdateTimelineFromValue(int value, bool commit);
+    void CancelTimelineDrag();
+    void SetTimelineAnimationTarget(bool active, ULONGLONG now);
+    void UpdateTimelineAnimation(ULONGLONG now);
+    [[nodiscard]] bool TimelineAnimationActive() const noexcept;
     void RecordInteraction();
     void RecordMouseMovement();
     [[nodiscard]] bool IsCursorOverControls() const noexcept;
@@ -187,8 +193,14 @@ private:
     ULONGLONG controlsAnimationDuration_{0};
     double controlsAnimationFrom_{1.0};
     double controlsAnimationProgress_{1.0};
-    unsigned timerTick_{0};
-    unsigned benchmarkTick_{0};
+    ULONGLONG timelineAnimationStarted_{0};
+    ULONGLONG timelineAnimationDuration_{0};
+    ULONGLONG timelineSeekPreviewUntil_{0};
+    double timelineAnimationFrom_{0.0};
+    double timelineAnimationProgress_{0.0};
+    double timelineAnimationTarget_{0.0};
+    double timelinePreviewSeconds_{0.0};
+    UINT uiTimerInterval_{0};
     unsigned dpi_{96};
     std::size_t shaderPresetIndex_{0};
     int audioSelection_{-1};
@@ -214,6 +226,8 @@ private:
     std::string browserRetryUrl_;
     HeaderMap browserRetryHeaders_;
     unsigned browserRetriesRemaining_{0};
+    std::chrono::steady_clock::time_point lastStatisticsUpdate_{};
+    std::chrono::steady_clock::time_point lastBenchmarkSample_{};
     std::chrono::steady_clock::time_point benchmarkStart_{};
     std::chrono::steady_clock::time_point playbackLoadStarted_{};
     std::vector<PlaybackStatistics> benchmarkSamples_;

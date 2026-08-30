@@ -37,12 +37,20 @@ constexpr UINT kPlaybackMessage = WM_APP + 1;
 constexpr UINT kResolverMessage = WM_APP + 2;
 constexpr UINT kInteractionMessage = WM_APP + 3;
 constexpr UINT kTimelineHoverMessage = WM_APP + 4;
+constexpr UINT kTimelineSeekMessage = WM_APP + 5;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr ULONGLONG kControlsHideDelayMs = 1500;
 constexpr ULONGLONG kControlsShowAnimationMs = 160;
 constexpr ULONGLONG kControlsHideAnimationMs = 120;
+constexpr ULONGLONG kTimelineAnimationMs = 120;
+constexpr ULONGLONG kTimelineSeekPreviewMs = 1500;
 constexpr UINT kControlsAnimationTimerMs = 16;
+constexpr UINT kUiRefreshTimerMs = 33;
+constexpr int kTimelineChannelInset = 7;
 constexpr wchar_t kHoverProperty[] = L"WannaViewer.Hovered";
+constexpr wchar_t kTimelineDragProperty[] = L"WannaViewer.TimelineDragging";
+
+enum class TimelineInput : WPARAM { Begin, Update, Commit, Cancel };
 constexpr int kPlay = 100;
 constexpr int kTimeline = 101;
 constexpr int kVolume = 102;
@@ -95,6 +103,17 @@ constexpr int kDwmRoundCorners = 2;
 
 Gdiplus::Color SmoothColor(COLORREF color, BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(color), GetGValue(color), GetBValue(color));
+}
+
+COLORREF BlendColor(COLORREF from, COLORREF to, double amount) {
+    amount = std::clamp(amount, 0.0, 1.0);
+    const auto blend = [amount](BYTE start, BYTE end) {
+        return static_cast<BYTE>(std::lround(static_cast<double>(start) +
+                                             (static_cast<double>(end) - start) * amount));
+    };
+    return RGB(blend(GetRValue(from), GetRValue(to)),
+               blend(GetGValue(from), GetGValue(to)),
+               blend(GetBValue(from), GetBValue(to)));
 }
 
 void ConfigureSmoothGraphics(Gdiplus::Graphics& graphics) {
@@ -159,6 +178,14 @@ void FillSmoothEllipse(HDC dc, RECT rectangle, COLORREF color) {
     Gdiplus::SolidBrush fill(SmoothColor(color));
     graphics.FillEllipse(&fill, static_cast<float>(rectangle.left), static_cast<float>(rectangle.top),
                          static_cast<float>(width), static_cast<float>(height));
+}
+
+void FillSmoothEllipse(HDC dc, float left, float top, float width, float height, COLORREF color) {
+    if (!dc || width <= 0.0F || height <= 0.0F) return;
+    Gdiplus::Graphics graphics(dc);
+    ConfigureSmoothGraphics(graphics);
+    Gdiplus::SolidBrush fill(SmoothColor(color));
+    graphics.FillEllipse(&fill, left, top, width, height);
 }
 
 void StrokeRoundedRectangle(HDC dc, RECT rectangle, COLORREF color, int diameter,
@@ -265,6 +292,8 @@ LRESULT CALLBACK VideoSubclass(HWND window, UINT message, WPARAM wParam, LPARAM 
 
 LRESULT CALLBACK InteractionSubclass(HWND window, UINT message, WPARAM wParam, LPARAM lParam,
                                      UINT_PTR, DWORD_PTR reference) {
+    const HWND owner = reinterpret_cast<HWND>(reference);
+    const bool timeline = GetDlgCtrlID(window) == kTimeline;
     if (message == WM_MOUSEMOVE) {
         if (!GetPropW(window, kHoverProperty)) {
             (void)SetPropW(window, kHoverProperty,
@@ -278,16 +307,45 @@ LRESULT CALLBACK InteractionSubclass(HWND window, UINT message, WPARAM wParam, L
         InvalidateRect(window, nullptr, FALSE);
     } else if (message == WM_NCDESTROY) {
         RemovePropW(window, kHoverProperty);
+        RemovePropW(window, kTimelineDragProperty);
     }
-    if (GetDlgCtrlID(window) == kTimeline) {
+    if (timeline) {
         if (message == WM_MOUSEMOVE)
-            PostMessageW(reinterpret_cast<HWND>(reference), kTimelineHoverMessage, TRUE, GET_X_LPARAM(lParam));
+            PostMessageW(owner, kTimelineHoverMessage, TRUE, GET_X_LPARAM(lParam));
         else if (message == WM_MOUSELEAVE)
-            PostMessageW(reinterpret_cast<HWND>(reference), kTimelineHoverMessage, FALSE, 0);
+            PostMessageW(owner, kTimelineHoverMessage, FALSE, 0);
+
+        if (message == WM_LBUTTONDOWN && IsWindowEnabled(window)) {
+            SetFocus(window);
+            SetCapture(window);
+            (void)SetPropW(window, kTimelineDragProperty,
+                           reinterpret_cast<HANDLE>(static_cast<INT_PTR>(1)));
+            SendMessageW(owner, kTimelineSeekMessage,
+                         static_cast<WPARAM>(TimelineInput::Begin), GET_X_LPARAM(lParam));
+            return 0;
+        }
+        if (message == WM_MOUSEMOVE && GetPropW(window, kTimelineDragProperty)) {
+            SendMessageW(owner, kTimelineSeekMessage,
+                         static_cast<WPARAM>(TimelineInput::Update), GET_X_LPARAM(lParam));
+            return 0;
+        }
+        if (message == WM_LBUTTONUP && GetPropW(window, kTimelineDragProperty)) {
+            RemovePropW(window, kTimelineDragProperty);
+            if (GetCapture() == window) ReleaseCapture();
+            SendMessageW(owner, kTimelineSeekMessage,
+                         static_cast<WPARAM>(TimelineInput::Commit), GET_X_LPARAM(lParam));
+            return 0;
+        }
+        if ((message == WM_CAPTURECHANGED || message == WM_CANCELMODE) &&
+            GetPropW(window, kTimelineDragProperty)) {
+            RemovePropW(window, kTimelineDragProperty);
+            SendMessageW(owner, kTimelineSeekMessage,
+                         static_cast<WPARAM>(TimelineInput::Cancel), 0);
+        }
     }
     if (message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_POINTERDOWN ||
         message == WM_POINTERUPDATE || message == WM_SETFOCUS)
-        PostMessageW(reinterpret_cast<HWND>(reference), kInteractionMessage,
+        PostMessageW(owner, kInteractionMessage,
                      message == WM_MOUSEMOVE ? TRUE : FALSE, 0);
     return DefSubclassProc(window, message, wParam, lParam);
 }
@@ -771,6 +829,13 @@ void PlayerWindow::SetMediaLoaded(bool loaded) {
         controlsAnimationFrom_ = 1.0;
         controlsAnimationProgress_ = 1.0;
         controlsAnimationDuration_ = 0;
+        timelineDragging_ = false;
+        timelineHovering_ = false;
+        timelineAnimationFrom_ = 0.0;
+        timelineAnimationProgress_ = 0.0;
+        timelineAnimationTarget_ = 0.0;
+        timelineAnimationDuration_ = 0;
+        timelineSeekPreviewUntil_ = 0;
     }
     LayoutControls();
     UpdateActiveTimer();
@@ -821,6 +886,91 @@ void PlayerWindow::UpdateControlsAnimation(ULONGLONG now) {
     LayoutControls();
 }
 
+void PlayerWindow::UpdateTimelineFromPoint(int clientX, bool commit) {
+    if (!timeline_) return;
+    timelineHoverX_ = clientX;
+    RECT client{};
+    GetClientRect(timeline_, &client);
+    const int minimum = static_cast<int>(SendMessageW(timeline_, TBM_GETRANGEMIN, 0, 0));
+    const int maximum = static_cast<int>(SendMessageW(timeline_, TBM_GETRANGEMAX, 0, 0));
+    const int channelLeft = client.left + Scale(kTimelineChannelInset);
+    const int channelRight = client.right - Scale(kTimelineChannelInset);
+    UpdateTimelineFromValue(
+        ui::TimelineValueFromPoint(clientX, channelLeft, channelRight, minimum, maximum), commit);
+}
+
+void PlayerWindow::UpdateTimelineFromValue(int value, bool commit) {
+    if (!timeline_ || !mediaLoaded_) return;
+    const int minimum = static_cast<int>(SendMessageW(timeline_, TBM_GETRANGEMIN, 0, 0));
+    const int maximum = static_cast<int>(SendMessageW(timeline_, TBM_GETRANGEMAX, 0, 0));
+    value = std::clamp(value, minimum, maximum);
+    const double duration = engine_.Duration();
+    if (duration <= 0.0 || maximum <= minimum) {
+        timelineDragging_ = false;
+        RecordInteraction();
+        return;
+    }
+
+    SendMessageW(timeline_, TBM_SETPOS, TRUE, value);
+    const double ratio = static_cast<double>(value - minimum) / static_cast<double>(maximum - minimum);
+    timelinePreviewSeconds_ = duration * ratio;
+    const auto label = TimeText(timelinePreviewSeconds_) + L"  /  " + TimeText(duration);
+    SetWindowTextW(timeLabel_, label.c_str());
+    InvalidateRect(timeline_, nullptr, FALSE);
+
+    timelineDragging_ = !commit;
+    const ULONGLONG now = GetTickCount64();
+    if (commit) {
+        timelineSeekPreviewUntil_ = now + kTimelineSeekPreviewMs;
+        engine_.SeekAbsolute(timelinePreviewSeconds_);
+    }
+    SetTimelineAnimationTarget(timelineDragging_ || timelineHovering_, now);
+    RecordInteraction();
+}
+
+void PlayerWindow::CancelTimelineDrag() {
+    if (!timelineDragging_) return;
+    timelineDragging_ = false;
+    timelineSeekPreviewUntil_ = 0;
+    SetTimelineAnimationTarget(timelineHovering_, GetTickCount64());
+    UpdateUi();
+    RecordInteraction();
+}
+
+void PlayerWindow::SetTimelineAnimationTarget(bool active, ULONGLONG now) {
+    UpdateTimelineAnimation(now);
+    const double target = active ? 1.0 : 0.0;
+    if (timelineAnimationTarget_ == target) return;
+    timelineAnimationFrom_ = timelineAnimationProgress_;
+    timelineAnimationTarget_ = target;
+    timelineAnimationStarted_ = now;
+    const double remaining = std::abs(target - timelineAnimationProgress_);
+    timelineAnimationDuration_ = animationsEnabled_
+        ? static_cast<ULONGLONG>(std::lround(static_cast<double>(kTimelineAnimationMs) * remaining))
+        : 0;
+    if (timelineAnimationDuration_ == 0) timelineAnimationProgress_ = target;
+    InvalidateRect(timeline_, nullptr, FALSE);
+    UpdateActiveTimer();
+}
+
+bool PlayerWindow::TimelineAnimationActive() const noexcept {
+    return timelineAnimationDuration_ != 0;
+}
+
+void PlayerWindow::UpdateTimelineAnimation(ULONGLONG now) {
+    if (!TimelineAnimationActive()) return;
+    const double elapsed = static_cast<double>(now - timelineAnimationStarted_);
+    const double linear = std::clamp(elapsed / static_cast<double>(timelineAnimationDuration_), 0.0, 1.0);
+    const double eased = 1.0 - std::pow(1.0 - linear, 3.0);
+    timelineAnimationProgress_ = timelineAnimationFrom_ +
+                                 (timelineAnimationTarget_ - timelineAnimationFrom_) * eased;
+    if (linear >= 1.0) {
+        timelineAnimationProgress_ = timelineAnimationTarget_;
+        timelineAnimationDuration_ = 0;
+    }
+    InvalidateRect(timeline_, nullptr, FALSE);
+}
+
 void PlayerWindow::RecordInteraction() {
     lastInteraction_ = GetTickCount64();
     ShowControls(true);
@@ -850,19 +1000,27 @@ bool PlayerWindow::IsCursorOverControls() const noexcept {
 
 void PlayerWindow::UpdateActiveTimer() {
     const bool waitingForFirstFrame = (mediaOpening_ || mediaLoaded_) && !playbackStarted_;
-    if (ControlsAnimationActive())
-        SetTimer(window_, kUiTimer, kControlsAnimationTimerMs, nullptr);
-    else if ((mediaLoaded_ && controlsVisible_) || waitingForFirstFrame || statisticsVisible_ || benchmarkMode_ ||
-        sourceSelection_ || overlayMode_ != OverlayMode::None)
-        SetTimer(window_, kUiTimer, 250, nullptr);
-    else KillTimer(window_, kUiTimer);
+    const UINT desiredInterval = ControlsAnimationActive() || TimelineAnimationActive()
+        ? kControlsAnimationTimerMs
+        : ((mediaLoaded_ && controlsVisible_) || waitingForFirstFrame || statisticsVisible_ || benchmarkMode_ ||
+           sourceSelection_ || overlayMode_ != OverlayMode::None)
+            ? kUiRefreshTimerMs
+            : 0;
+    if (desiredInterval == uiTimerInterval_) return;
+    if (desiredInterval == 0)
+        KillTimer(window_, kUiTimer);
+    else
+        SetTimer(window_, kUiTimer, desiredInterval, nullptr);
+    uiTimerInterval_ = desiredInterval;
 }
 
 void PlayerWindow::UpdateUi() {
     const double duration = engine_.Duration();
     const double position = engine_.Position();
+    const ULONGLONG now = GetTickCount64();
+    const auto steadyNow = std::chrono::steady_clock::now();
     if ((mediaOpening_ || mediaLoaded_) && !playbackStarted_ && !startupTimeoutReported_ &&
-        std::chrono::steady_clock::now() - playbackLoadStarted_ > std::chrono::seconds(30)) {
+        steadyNow - playbackLoadStarted_ > std::chrono::seconds(30)) {
         startupTimeoutReported_ = true;
         engine_.Stop();
         SetMediaLoaded(false);
@@ -872,9 +1030,19 @@ void PlayerWindow::UpdateUi() {
         return;
     }
     if (controlsVisible_ && !timelineDragging_) {
-        const int trackPosition = duration > 0.0 ? static_cast<int>(std::clamp(position / duration, 0.0, 1.0) * 10000.0) : 0;
+        double displayPosition = position;
+        if (timelineSeekPreviewUntil_ != 0) {
+            const bool seekArrived = std::abs(position - timelinePreviewSeconds_) <= 1.0;
+            if (now >= timelineSeekPreviewUntil_ || seekArrived || duration <= 0.0)
+                timelineSeekPreviewUntil_ = 0;
+            else
+                displayPosition = timelinePreviewSeconds_;
+        }
+        const int trackPosition = duration > 0.0
+            ? static_cast<int>(std::lround(std::clamp(displayPosition / duration, 0.0, 1.0) * 10000.0))
+            : 0;
         SendMessageW(timeline_, TBM_SETPOS, TRUE, trackPosition);
-        const auto label = TimeText(position) + L"  /  " + TimeText(duration);
+        const auto label = TimeText(displayPosition) + L"  /  " + TimeText(duration);
         SetWindowTextW(timeLabel_, label.c_str());
         const wchar_t* playText = !mediaLoaded_ || engine_.IsPaused() ? L"Play" : L"Pause";
         SetWindowTextW(playButton_, playText);
@@ -882,11 +1050,14 @@ void PlayerWindow::UpdateUi() {
         InvalidateRect(timeline_, nullptr, FALSE);
         InvalidateRect(volume_, nullptr, FALSE);
     }
-    if (statisticsVisible_ && (++timerTick_ % 2U) == 0) {
+    if (statisticsVisible_ && (lastStatisticsUpdate_ == std::chrono::steady_clock::time_point{} ||
+        steadyNow - lastStatisticsUpdate_ >= std::chrono::milliseconds(500))) {
+        lastStatisticsUpdate_ = steadyNow;
         const auto text = Utf8ToWide(engine_.Statistics().ToDisplayText());
         SetWindowTextW(stats_, text.c_str());
     }
-    if (benchmarkRunning_ && (++benchmarkTick_ % 4U) == 0) {
+    if (benchmarkRunning_ && steadyNow - lastBenchmarkSample_ >= std::chrono::seconds(1)) {
+        lastBenchmarkSample_ = steadyNow;
         auto sample = engine_.Statistics();
         if (benchmarkDroppedBaseline_ < 0) {
             benchmarkDroppedBaseline_ = sample.droppedFrames;
@@ -986,6 +1157,7 @@ void PlayerWindow::ToggleFullscreen() {
 void PlayerWindow::ToggleStatistics() {
     if (!mediaLoaded_) return;
     statisticsVisible_ = !statisticsVisible_;
+    if (statisticsVisible_) lastStatisticsUpdate_ = {};
     LayoutControls();
     UpdateActiveTimer();
 }
@@ -1481,10 +1653,10 @@ void PlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         SetWindowTextW(window_, benchmarkMode_ ? L"WannaViewer — benchmark running" : L"WannaViewer — playing");
         if (benchmarkMode_ && !benchmarkRunning_) {
             benchmarkSamples_.clear();
-            benchmarkTick_ = 0;
             benchmarkDroppedBaseline_ = -1;
             benchmarkDelayedBaseline_ = -1;
             benchmarkStart_ = std::chrono::steady_clock::now();
+            lastBenchmarkSample_ = benchmarkStart_;
             benchmarkRunning_ = true;
         }
         UpdateActiveTimer();
@@ -1849,11 +2021,15 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW& customDraw) {
     const int minimum = static_cast<int>(SendMessageW(customDraw.hdr.hwndFrom, TBM_GETRANGEMIN, 0, 0));
     const int maximum = static_cast<int>(SendMessageW(customDraw.hdr.hwndFrom, TBM_GETRANGEMAX, 0, 0));
     const int position = static_cast<int>(SendMessageW(customDraw.hdr.hwndFrom, TBM_GETPOS, 0, 0));
-    const int margin = timeline ? 0 : Scale(5);
+    const double interaction = timeline ? std::clamp(timelineAnimationProgress_, 0.0, 1.0) : 0.0;
+    const int margin = Scale(timeline ? kTimelineChannelInset : 5);
     const int centerY = timeline ? client.bottom - Scale(9) : (client.top + client.bottom) / 2;
     RECT channel{client.left + margin, centerY - Scale(timeline ? 2 : 1),
                  client.right - margin, centerY + Scale(2)};
-    FillRoundedRectangle(customDraw.hdc, channel, RGB(48, 48, 48), Scale(4));
+    FillRoundedRectangle(customDraw.hdc, channel,
+                         timeline ? BlendColor(RGB(48, 48, 48), RGB(66, 66, 66), interaction)
+                                  : RGB(48, 48, 48),
+                         Scale(4));
     const double ratio = maximum > minimum
         ? std::clamp(static_cast<double>(position - minimum) / static_cast<double>(maximum - minimum), 0.0, 1.0)
         : 0.0;
@@ -1862,11 +2038,13 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW& customDraw) {
     if (progress.right > progress.left)
         FillRoundedRectangle(customDraw.hdc, progress, enabled ? kTextColor : RGB(82, 82, 82), Scale(4));
     const int thumbX = std::clamp(progress.right, channel.left, channel.right);
-    const int thumbRadius = Scale(timeline ? 6 : 4);
-    const RECT thumbRectangle{thumbX - thumbRadius, centerY - thumbRadius,
-                              thumbX + thumbRadius + 1, centerY + thumbRadius + 1};
-    FillSmoothEllipse(customDraw.hdc, thumbRectangle, enabled ? kTextColor : RGB(82, 82, 82));
-    if (timeline && timelineHovering_ && engine_.Duration() > 0.0) {
+    const float thumbRadius = timeline
+        ? static_cast<float>(Scale(5)) + static_cast<float>(Scale(2)) * static_cast<float>(interaction)
+        : static_cast<float>(Scale(4));
+    FillSmoothEllipse(customDraw.hdc, static_cast<float>(thumbX) - thumbRadius,
+                      static_cast<float>(centerY) - thumbRadius, thumbRadius * 2.0F,
+                      thumbRadius * 2.0F, enabled ? kTextColor : RGB(82, 82, 82));
+    if (timeline && interaction > 0.01 && engine_.Duration() > 0.0) {
         const int channelLeft = static_cast<int>(channel.left);
         const int channelRight = static_cast<int>(channel.right);
         const int hoverX = std::clamp(timelineHoverX_, channelLeft, channelRight);
@@ -1874,9 +2052,11 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW& customDraw) {
                                   static_cast<double>(std::max(1, channelRight - channelLeft));
         const auto label = TimeText(engine_.Duration() * hoverRatio);
         const int bubbleWidth = Scale(72);
+        const int bubbleOffset = static_cast<int>(std::lround(
+            static_cast<double>(Scale(5)) * (1.0 - interaction)));
         RECT bubble{std::clamp(hoverX - bubbleWidth / 2, static_cast<int>(client.left),
                                static_cast<int>(client.right) - bubbleWidth),
-                    client.top, 0, Scale(29)};
+                    client.top + bubbleOffset, 0, Scale(29) + bubbleOffset};
         bubble.right = bubble.left + bubbleWidth;
         PaintRoundedRectangle(customDraw.hdc, bubble, RGB(7, 7, 7), kBorderColor, Scale(12));
         {
@@ -1891,8 +2071,9 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW& customDraw) {
             graphics.DrawLines(&arrowBorder, arrow, static_cast<INT>(std::size(arrow)));
         }
         SetBkMode(customDraw.hdc, TRANSPARENT); SetTextColor(customDraw.hdc, kTextColor);
-        SelectObject(customDraw.hdc, font_);
+        const HGDIOBJ previousFont = SelectObject(customDraw.hdc, font_);
         DrawTextW(customDraw.hdc, label.c_str(), -1, &bubble, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (previousFont) SelectObject(customDraw.hdc, previousFont);
     }
     return CDRF_SKIPDEFAULT;
 }
@@ -1938,19 +2119,36 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         return 0;
     case kTimelineHoverMessage:
         timelineHovering_ = wParam != FALSE;
-        timelineHoverX_ = static_cast<int>(lParam);
-        InvalidateRect(timeline_, nullptr, FALSE);
+        if (timelineHovering_) timelineHoverX_ = static_cast<int>(lParam);
+        SetTimelineAnimationTarget(timelineHovering_ || timelineDragging_, GetTickCount64());
+        return 0;
+    case kTimelineSeekMessage:
+        switch (static_cast<TimelineInput>(wParam)) {
+        case TimelineInput::Begin:
+        case TimelineInput::Update:
+            UpdateTimelineFromPoint(static_cast<int>(lParam), false);
+            break;
+        case TimelineInput::Commit:
+            UpdateTimelineFromPoint(static_cast<int>(lParam), true);
+            break;
+        case TimelineInput::Cancel:
+            CancelTimelineDrag();
+            break;
+        }
         return 0;
     case WM_TIMER:
         if (wParam == kUiTimer) {
-            UpdateControlsAnimation(GetTickCount64());
+            const ULONGLONG now = GetTickCount64();
+            UpdateControlsAnimation(now);
+            UpdateTimelineAnimation(now);
             UpdateUi();
-            if (!ControlsAnimationActive() && mediaLoaded_ && controlsVisible_ &&
+            if (!ControlsAnimationActive() && !TimelineAnimationActive() &&
+                mediaLoaded_ && controlsVisible_ &&
                 !sourceSelection_ && overlayMode_ == OverlayMode::None &&
                 !timelineDragging_ && !IsCursorOverControls() &&
-                GetTickCount64() - lastInteraction_ >= kControlsHideDelayMs)
+                now - lastInteraction_ >= kControlsHideDelayMs)
                 ShowControls(false);
-            if (!ControlsAnimationActive()) UpdateActiveTimer();
+            if (!ControlsAnimationActive() && !TimelineAnimationActive()) UpdateActiveTimer();
         }
         return 0;
     case WM_COMMAND: {
@@ -2027,12 +2225,9 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_HSCROLL:
         if (reinterpret_cast<HWND>(lParam) == timeline_) {
             const auto code = LOWORD(wParam);
-            timelineDragging_ = code == TB_THUMBTRACK;
-            if (code == TB_ENDTRACK || code == TB_THUMBPOSITION) {
-                const auto position = static_cast<int>(SendMessageW(timeline_, TBM_GETPOS, 0, 0));
-                engine_.SeekAbsolute(engine_.Duration() * static_cast<double>(position) / 10000.0);
-                timelineDragging_ = false;
-            }
+            const auto position = static_cast<int>(SendMessageW(timeline_, TBM_GETPOS, 0, 0));
+            UpdateTimelineFromValue(position, code != TB_THUMBTRACK);
+            return 0;
         } else if (reinterpret_cast<HWND>(lParam) == volume_) {
             engine_.SetVolume(static_cast<double>(SendMessageW(volume_, TBM_GETPOS, 0, 0)));
         }

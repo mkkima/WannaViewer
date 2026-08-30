@@ -21,7 +21,12 @@ $start.ArgumentList.Add((Resolve-Path -LiteralPath $Media).Path)
 $process = [System.Diagnostics.Process]::Start($start)
 try {
     $process.WaitForInputIdle(10000) | Out-Null
-    $process.Refresh()
+    $startupDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 50
+        $process.Refresh()
+    } while (-not $process.HasExited -and $process.MainWindowHandle -eq 0 -and
+             [DateTime]::UtcNow -lt $startupDeadline)
     if ($process.HasExited -or $process.MainWindowHandle -eq 0) { throw 'Player window did not start' }
     $window = $process.MainWindowHandle
     foreach ($key in @(0x20,0x20,0x27,0x53,0x41,0x46,0x46,0x79)) {

@@ -1,9 +1,9 @@
 # WannaViewer
 
 WannaViewer is a small Qt Widgets frontend for libmpv. Its default playback path is
-hardware decoding into GPU surfaces, `vo=gpu-next`/libplacebo rendering, and a
-native D3D11 presentation path on Windows. It does not copy decoded frames into
-the application.
+hardware decoding into GPU surfaces and libplacebo rendering through libmpv's
+OpenGL Render API into a `QOpenGLWidget` on Windows. Video remains on the GPU;
+the application does not copy decoded frames through CPU memory.
 
 ## Build and run on Windows 11
 

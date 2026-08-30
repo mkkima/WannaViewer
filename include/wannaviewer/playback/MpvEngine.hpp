@@ -7,6 +7,7 @@
 #include "wannaviewer/playback/PlaybackStatistics.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <thread>
@@ -57,6 +58,11 @@ public:
     void Initialize(std::uintptr_t nativeWindow, EventCallback callback);
     void Shutdown() noexcept;
     [[nodiscard]] bool IsInitialized() const noexcept;
+    [[nodiscard]] bool UsesOpenGlRenderApi() const noexcept;
+    void CreateOpenGlRenderContext(mpv_opengl_init_params* initialization,
+                                   mpv_render_update_fn updateCallback, void* callbackContext);
+    void DestroyOpenGlRenderContext() noexcept;
+    [[nodiscard]] bool RenderOpenGl(int frameBuffer, int width, int height);
 
     void Open(std::string_view pathOrUrl, const std::vector<std::pair<std::string, std::string>>& headers = {},
               std::string_view externalAudioUrl = {});
@@ -102,6 +108,8 @@ private:
     std::jthread eventThread_;
     std::atomic_bool initialized_{false};
     std::atomic_bool initializing_{false};
+    bool openGlRenderApi_{false};
+    mpv_render_context* renderContext_{nullptr};
     mutable std::mutex tracksMutex_;
     std::vector<MediaTrack> tracks_;
     mutable std::mutex shaderMutex_;

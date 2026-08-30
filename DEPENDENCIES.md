@@ -7,7 +7,7 @@
 | Anime4K GLSL | v4.0.1, tag commit `4029bf701ecaa15f163cdc49cffe5501c1acf410` | `Anime4K_v4.0.zip`, SHA-256 `139cd282086457c5adc79caf7b75b8b825091d71c9b54958c18745fea62d7ed7` | Optional shaders | MIT |
 | yt-dlp | 2026.08.19 | `yt-dlp.exe`, SHA-256 `66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a` | Optional page extraction | Unlicense |
 | Microsoft Edge WebView2 SDK/loader | 1.0.4129.50 | NuGet `microsoft.web.webview2.1.0.4129.50.nupkg`, SHA-256 `d3934f482d484b89fb4825df720c710664e1143a1e90f7b3a60794ef33f473d2` | Sandboxed Kodik/Alloha public embed execution on Windows | Microsoft BSD-style license; bundled license and notice included |
-| Qt Base / Qt Widgets | 6.8.3, MSVC 2022 x64 | Official `qtbase` SDK archive, SHA-256 `41688269fac0565db956c66d9eecae777d16197e0c02cd81b88640c1f5d73d3f` | Retained-mode Windows UI, layout, input and short transitions | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only; dynamically linked and deployed with notices |
+| Qt Base / Qt Widgets / Qt OpenGLWidgets | 6.8.3, MSVC 2022 x64 | Official `qtbase` SDK archive, SHA-256 `41688269fac0565db956c66d9eecae777d16197e0c02cd81b88640c1f5d73d3f` | Retained-mode Windows UI, layout, input, transitions, and the libmpv OpenGL render target | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only; dynamically linked and deployed with notices |
 
 The current mpv DLL reports libplacebo v7.351.0 and an FFmpeg development
 snapshot. It is kept outside the source tree and downloaded reproducibly by

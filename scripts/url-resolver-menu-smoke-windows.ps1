@@ -68,12 +68,12 @@ $playerPath = (Resolve-Path -LiteralPath $Player).Path
 foreach ($url in $Urls) {
     $start = [Diagnostics.ProcessStartInfo]::new($playerPath)
     $start.UseShellExecute = $false
-    $start.ArgumentList.Add('--background-ui-test')
+    $start.ArgumentList.Add($(if ($VerifyYummyPlayback) { '--background-render-test' } else { '--background-ui-test' }))
     $start.ArgumentList.Add($url)
     $process = [Diagnostics.Process]::Start($start)
     try {
         [void]$process.WaitForInputIdle(10000)
-        $windowDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
         do {
             Start-Sleep -Milliseconds 50
             $process.Refresh()
@@ -139,16 +139,16 @@ foreach ($url in $Urls) {
 
         if ($VerifyYummyPlayback -and $hostName -eq 'ru.yummyani.me') {
             Invoke-UiAction $window 7
-            $playbackDeadline = [DateTime]::UtcNow.AddSeconds(45)
+            $playbackDeadline = [DateTime]::UtcNow.AddSeconds(75)
             do {
-                if ((Get-UiValue $window 5) -eq 1) { break }
+                if ((Get-UiValue $window 5) -eq 1 -and (Get-UiValue $window 10) -eq 1) { break }
                 Start-Sleep -Milliseconds 100
                 $process.Refresh()
             } while (-not $process.HasExited -and [DateTime]::UtcNow -lt $playbackDeadline)
-            if ($process.HasExited -or (Get-UiValue $window 5) -ne 1) {
-                throw 'CVH was selected but playback did not produce a frame'
+            if ($process.HasExited -or (Get-UiValue $window 5) -ne 1 -or (Get-UiValue $window 10) -ne 1) {
+                throw 'CVH was selected but the OpenGL framebuffer did not produce a visible frame'
             }
-            Write-Host 'CVH selection produced a playback frame.'
+            Write-Host 'CVH selection produced a visible OpenGL playback frame.'
         }
 
         Invoke-UiAction $window 5

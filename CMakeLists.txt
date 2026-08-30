@@ -58,7 +58,7 @@ else()
 endif()
 
 if(WIN32)
-  find_package(Qt6 6.8.3 REQUIRED COMPONENTS Widgets)
+  find_package(Qt6 6.8.3 REQUIRED COMPONENTS Widgets OpenGLWidgets)
   FetchContent_Declare(
     webview2_sdk
     URL https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4129.50/microsoft.web.webview2.1.0.4129.50.nupkg
@@ -95,7 +95,7 @@ if(WIN32)
     resources/windows/app.manifest
   )
   set_target_properties(WannaViewer PROPERTIES OUTPUT_NAME "player")
-  target_link_libraries(WannaViewer PRIVATE wannaviewer_core Qt6::Widgets ole32 shell32 shlwapi dxgi)
+  target_link_libraries(WannaViewer PRIVATE wannaviewer_core Qt6::Widgets Qt6::OpenGLWidgets ole32 shell32 shlwapi dxgi)
   target_compile_options(WannaViewer PRIVATE /W4 /WX /permissive- /EHsc /utf-8 /Zc:__cplusplus /sdl /guard:cf)
   target_link_options(WannaViewer PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf)
 

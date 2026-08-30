@@ -5,6 +5,7 @@
 #include <QMessageBox>
 #include <QScreen>
 #include <QStringList>
+#include <QSurfaceFormat>
 
 #include <algorithm>
 #include <exception>
@@ -16,6 +17,14 @@
 
 int main(int argumentCount, char** arguments) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    QSurfaceFormat videoFormat;
+    videoFormat.setRenderableType(QSurfaceFormat::OpenGL);
+    videoFormat.setVersion(3, 3);
+    videoFormat.setProfile(QSurfaceFormat::CoreProfile);
+    videoFormat.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+    videoFormat.setSwapInterval(1);
+    QSurfaceFormat::setDefaultFormat(videoFormat);
     QApplication application(argumentCount, arguments);
     application.setApplicationName(QStringLiteral("WannaViewer"));
     application.setOrganizationName(QStringLiteral("WannaViewer"));
@@ -34,11 +43,13 @@ int main(int argumentCount, char** arguments) {
             const auto bytes = argument.toUtf8();
             commandLine.emplace_back(bytes.constData(), static_cast<std::size_t>(bytes.size()));
         }
-        backgroundTest = std::erase(commandLine, "--background-ui-test") != 0;
-        if (backgroundTest) {
-            // An off-screen HWND has no DXGI output. Keep background automation
-            // completely invisible and exercise demux/decode/UI state with mpv's
-            // null output instead of creating an invalid D3D swap chain.
+        const bool backgroundUiTest = std::erase(commandLine, "--background-ui-test") != 0;
+        const bool backgroundRenderTest = std::erase(commandLine, "--background-render-test") != 0;
+        backgroundTest = backgroundUiTest || backgroundRenderTest;
+        if (backgroundRenderTest) config.Set("logging.level", "debug");
+        if (backgroundUiTest) {
+            // Keep layout/input automation completely off-screen and use mpv's
+            // null output. The separate render smoke covers the real OpenGL path.
             config.Set("playback.vo", "null");
             config.Set("playback.hwdec", "no");
         }
@@ -65,10 +76,23 @@ int main(int argumentCount, char** arguments) {
         logger.Write(wannaviewer::LogLevel::Info, "application", "WannaViewer starting with Qt Widgets UI");
 
         wannaviewer::QtPlayerWindow window(std::move(paths), std::move(config), logger, backgroundTest);
-        if (backgroundTest) {
+        if (backgroundUiTest) {
             QRect virtualDesktop;
             for (const auto* screen : QGuiApplication::screens()) virtualDesktop = virtualDesktop.united(screen->geometry());
             window.move(virtualDesktop.right() + 1024, virtualDesktop.bottom() + 1024);
+        } else if (backgroundRenderTest) {
+            window.setWindowFlag(Qt::Tool, true);
+            window.setAttribute(Qt::WA_TransparentForMouseEvents, true);
+            // A fully transparent top-level is culled by DWM and Qt will stop
+            // scheduling QOpenGLWidget paints. A 1%-opaque 64px tool window is
+            // effectively invisible while still exercising the real compositor.
+            window.setWindowOpacity(0.01);
+            window.setMinimumSize(1, 1);
+            window.resize(64, 64);
+            if (const auto* screen = QGuiApplication::primaryScreen()) {
+                const auto area = screen->availableGeometry();
+                window.move(area.right() - window.width() + 1, area.bottom() - window.height() + 1);
+            }
         }
         window.show();
         if (benchmark) window.EnableBenchmark(std::move(input), std::move(benchmarkMode));

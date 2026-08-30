@@ -89,6 +89,8 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         SetRequiredOption("panscan", "1.0");
         auto videoOutput = config_.GetString("playback.vo", "gpu-next");
         if (videoOutput != "gpu-next" && videoOutput != "null") videoOutput = "gpu-next";
+        openGlRenderApi_ = videoOutput != "null" && nativeWindow == 0;
+        if (openGlRenderApi_) videoOutput = "libmpv";
         SetRequiredOption("vo", videoOutput);
         SetRequiredOption("hwdec", config_.GetString("playback.hwdec", "auto"));
         SetRequiredOption("interpolation", "no");
@@ -110,7 +112,7 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         SetRequiredOption("gpu-shader-cache", "yes");
         SetRequiredOption("gpu-shader-cache-dir", paths_.cache.string());
         SetRequiredOption("target-colorspace-hint", "yes");
-        if (videoOutput != "null") {
+        if (videoOutput != "null" && !openGlRenderApi_) {
 #ifdef _WIN32
             SetRequiredOption("gpu-api", "d3d11");
             SetRequiredOption("gpu-context", "d3d11");
@@ -144,7 +146,8 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
                                   std::chrono::duration_cast<std::chrono::milliseconds>(
                                       coreInitialized - libraryLoaded).count(),
                                   videoOutput, config_.GetString("playback.hwdec", "auto"),
-                                  videoOutput == "null" ? "headless output" : "D3D11 output"));
+                                  videoOutput == "null" ? "headless output" :
+                                  openGlRenderApi_ ? "Qt OpenGL render API" : "D3D11 window output"));
 #else
         logger_.Write(LogLevel::Info, "playback",
                       std::format("libmpv initialized in {} ms (library {} ms, core {} ms): "
@@ -160,6 +163,7 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
     } catch (...) {
         initialized_.store(false, std::memory_order_release);
         initializing_.store(false, std::memory_order_release);
+        openGlRenderApi_ = false;
         if (handle_) {
             api_.TerminateDestroy(handle_);
             handle_ = nullptr;
@@ -170,6 +174,7 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
 
 void MpvEngine::Shutdown() noexcept {
     if (!initialized_.exchange(false)) return;
+    DestroyOpenGlRenderContext();
     if (eventThread_.joinable()) {
         eventThread_.request_stop();
         api_.Wakeup(handle_);
@@ -177,9 +182,51 @@ void MpvEngine::Shutdown() noexcept {
     }
     api_.TerminateDestroy(handle_);
     handle_ = nullptr;
+    openGlRenderApi_ = false;
 }
 
 bool MpvEngine::IsInitialized() const noexcept { return initialized_.load(); }
+bool MpvEngine::UsesOpenGlRenderApi() const noexcept { return openGlRenderApi_; }
+
+void MpvEngine::CreateOpenGlRenderContext(mpv_opengl_init_params* initialization,
+                                          mpv_render_update_fn updateCallback, void* callbackContext) {
+    if (!initialized_.load(std::memory_order_acquire) || !handle_ || !openGlRenderApi_)
+        throw std::logic_error("libmpv OpenGL rendering is not available");
+    if (renderContext_) return;
+    mpv_render_param parameters[] = {
+        {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
+        {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, initialization},
+        {MPV_RENDER_PARAM_INVALID, nullptr}
+    };
+    const int result = api_.RenderContextCreate(&renderContext_, handle_, parameters);
+    if (result < 0 || !renderContext_)
+        throw std::runtime_error(std::string("Unable to create libmpv OpenGL renderer: ") +
+                                 api_.ErrorString(result));
+    api_.RenderContextSetUpdateCallback(renderContext_, updateCallback, callbackContext);
+}
+
+void MpvEngine::DestroyOpenGlRenderContext() noexcept {
+    if (!renderContext_) return;
+    api_.RenderContextSetUpdateCallback(renderContext_, nullptr, nullptr);
+    api_.RenderContextFree(renderContext_);
+    renderContext_ = nullptr;
+}
+
+bool MpvEngine::RenderOpenGl(int frameBuffer, int width, int height) {
+    if (!renderContext_ || width <= 0 || height <= 0) return false;
+    const auto updateFlags = api_.RenderContextUpdate(renderContext_);
+    mpv_opengl_fbo target{frameBuffer, width, height, 0};
+    int flipVertically = 1;
+    mpv_render_param parameters[] = {
+        {MPV_RENDER_PARAM_OPENGL_FBO, &target},
+        {MPV_RENDER_PARAM_FLIP_Y, &flipVertically},
+        {MPV_RENDER_PARAM_INVALID, nullptr}
+    };
+    const int result = api_.RenderContextRender(renderContext_, parameters);
+    if (result < 0)
+        throw std::runtime_error(std::string("libmpv OpenGL rendering failed: ") + api_.ErrorString(result));
+    return (updateFlags & MPV_RENDER_UPDATE_FRAME) != 0;
+}
 
 void MpvEngine::Command(std::initializer_list<std::string> arguments) {
     if (!initialized_.load(std::memory_order_acquire) || !handle_) return;
@@ -324,7 +371,8 @@ PlaybackStatistics MpvEngine::Statistics() {
     result.hdrStatus = (result.transferFunction == "pq" || result.transferFunction == "hlg") ? "source HDR" : "SDR";
     result.hardwareDecoder = api_.GetString(handle_, "hwdec-current");
 #ifdef _WIN32
-    result.gpuRenderer = surfaceFormat.empty() ? "gpu-next/d3d11" : "gpu-next/d3d11 (" + surfaceFormat + ')';
+    const std::string renderer = openGlRenderApi_ ? "libmpv/OpenGL" : "gpu-next/d3d11";
+    result.gpuRenderer = surfaceFormat.empty() ? renderer : renderer + " (" + surfaceFormat + ')';
 #else
     result.gpuRenderer = surfaceFormat.empty() ? "gpu-next" : "gpu-next (" + surfaceFormat + ')';
 #endif

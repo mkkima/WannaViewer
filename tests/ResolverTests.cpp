@@ -271,8 +271,9 @@ WV_TEST("yt-dlp helper process uses machine-readable pinned executable") {
     const auto executable = std::filesystem::path(WANNAVIEWER_SOURCE_DIR) / "tools" / "yt-dlp.exe";
     if (!std::filesystem::is_regular_file(executable)) return;
     // First launch can be delayed by Windows attachment scanning on clean
-    // machines. This test verifies the pinned helper, not cold-start latency.
-    const auto result = wannaviewer::RunProcess(executable, {"--version"}, std::chrono::seconds(30), 64U * 1024U);
+    // machines. This test verifies the pinned helper, not cold-start latency;
+    // the signed 37 MB executable has exceeded 30 seconds on a cold cache.
+    const auto result = wannaviewer::RunProcess(executable, {"--version"}, std::chrono::seconds(60), 64U * 1024U);
     WV_REQUIRE(!result.timedOut);
     WV_REQUIRE(!result.cancelled);
     WV_REQUIRE(!result.outputTruncated);

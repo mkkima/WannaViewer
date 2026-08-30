@@ -65,7 +65,7 @@ $start.ArgumentList.Add('--background-ui-test')
 $process = [Diagnostics.Process]::Start($start)
 try {
     [void]$process.WaitForInputIdle(10000)
-    $startupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    $startupDeadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
         Start-Sleep -Milliseconds 40
         $process.Refresh()

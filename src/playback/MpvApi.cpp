@@ -13,7 +13,15 @@ namespace wannaviewer {
 
 MpvApi::~MpvApi() {
 #ifdef _WIN32
-    if (module_) FreeLibrary(static_cast<HMODULE>(module_));
+    // libmpv and its Windows media/GPU dependencies can initialize WinRT
+    // factories that are also cached by Qt's Windows platform plugin. If the
+    // DLL is unloaded before QApplication is destroyed, Windows.UI.dll can be
+    // unloaded while qwindows still owns one of those factory pointers; Qt's
+    // final winrt::clear_factory_cache() then dereferences unloaded code. The
+    // mpv handle and render context are still explicitly destroyed by
+    // MpvEngine::Shutdown(). Keep only the library module itself alive until
+    // normal process teardown, when Windows releases it after Qt has gone.
+    module_ = nullptr;
 #else
     if (module_) dlclose(module_);
 #endif
@@ -54,6 +62,12 @@ void MpvApi::Load(const std::filesystem::path& libraryPath) {
     waitEvent_ = Import<decltype(waitEvent_)>("mpv_wait_event");
     wakeup_ = Import<decltype(wakeup_)>("mpv_wakeup");
     errorString_ = Import<decltype(errorString_)>("mpv_error_string");
+    renderContextCreate_ = Import<decltype(renderContextCreate_)>("mpv_render_context_create");
+    renderContextSetUpdateCallback_ = Import<decltype(renderContextSetUpdateCallback_)>(
+        "mpv_render_context_set_update_callback");
+    renderContextUpdate_ = Import<decltype(renderContextUpdate_)>("mpv_render_context_update");
+    renderContextRender_ = Import<decltype(renderContextRender_)>("mpv_render_context_render");
+    renderContextFree_ = Import<decltype(renderContextFree_)>("mpv_render_context_free");
 }
 
 bool MpvApi::IsLoaded() const noexcept { return module_ != nullptr; }
@@ -70,6 +84,23 @@ int MpvApi::RequestLogMessages(mpv_handle* handle, const char* minimumLevel) con
 mpv_event* MpvApi::WaitEvent(mpv_handle* handle, double timeout) const { return waitEvent_(handle, timeout); }
 void MpvApi::Wakeup(mpv_handle* handle) const noexcept { if (handle) wakeup_(handle); }
 const char* MpvApi::ErrorString(int error) const noexcept { return errorString_ ? errorString_(error) : "unknown libmpv error"; }
+int MpvApi::RenderContextCreate(mpv_render_context** context, mpv_handle* handle,
+                                mpv_render_param* parameters) const {
+    return renderContextCreate_(context, handle, parameters);
+}
+void MpvApi::RenderContextSetUpdateCallback(mpv_render_context* context, mpv_render_update_fn callback,
+                                            void* callbackContext) const {
+    renderContextSetUpdateCallback_(context, callback, callbackContext);
+}
+std::uint64_t MpvApi::RenderContextUpdate(mpv_render_context* context) const {
+    return renderContextUpdate_(context);
+}
+int MpvApi::RenderContextRender(mpv_render_context* context, mpv_render_param* parameters) const {
+    return renderContextRender_(context, parameters);
+}
+void MpvApi::RenderContextFree(mpv_render_context* context) const noexcept {
+    if (context) renderContextFree_(context);
+}
 
 std::string MpvApi::GetString(mpv_handle* handle, const char* name) const {
     char* value = getPropertyString_(handle, name);

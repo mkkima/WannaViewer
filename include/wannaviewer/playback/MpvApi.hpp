@@ -5,6 +5,8 @@
 #include <string_view>
 
 #include <mpv/client.h>
+#include <mpv/render.h>
+#include <mpv/render_gl.h>
 
 namespace wannaviewer {
 
@@ -31,6 +33,13 @@ public:
     [[nodiscard]] mpv_event* WaitEvent(mpv_handle* handle, double timeout) const;
     void Wakeup(mpv_handle* handle) const noexcept;
     [[nodiscard]] const char* ErrorString(int error) const noexcept;
+    [[nodiscard]] int RenderContextCreate(mpv_render_context** context, mpv_handle* handle,
+                                          mpv_render_param* parameters) const;
+    void RenderContextSetUpdateCallback(mpv_render_context* context, mpv_render_update_fn callback,
+                                        void* callbackContext) const;
+    [[nodiscard]] std::uint64_t RenderContextUpdate(mpv_render_context* context) const;
+    [[nodiscard]] int RenderContextRender(mpv_render_context* context, mpv_render_param* parameters) const;
+    void RenderContextFree(mpv_render_context* context) const noexcept;
 
     [[nodiscard]] std::string GetString(mpv_handle* handle, const char* name) const;
     [[nodiscard]] double GetDouble(mpv_handle* handle, const char* name, double fallback = 0.0) const;
@@ -61,6 +70,11 @@ private:
     decltype(&mpv_wait_event) waitEvent_{nullptr};
     decltype(&mpv_wakeup) wakeup_{nullptr};
     decltype(&mpv_error_string) errorString_{nullptr};
+    decltype(&mpv_render_context_create) renderContextCreate_{nullptr};
+    decltype(&mpv_render_context_set_update_callback) renderContextSetUpdateCallback_{nullptr};
+    decltype(&mpv_render_context_update) renderContextUpdate_{nullptr};
+    decltype(&mpv_render_context_render) renderContextRender_{nullptr};
+    decltype(&mpv_render_context_free) renderContextFree_{nullptr};
 };
 
 } // namespace wannaviewer

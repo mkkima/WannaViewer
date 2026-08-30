@@ -30,12 +30,16 @@
 #include <QListWidget>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QOpenGLWidget>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScreen>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QStyle>
@@ -44,6 +48,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <filesystem>
 #include <format>
@@ -233,6 +238,125 @@ QPushButton* MakeIconButton(QWidget* parent, Glyph glyph, const QString& tooltip
 
 } // namespace
 
+class MpvVideoWidget final : public QOpenGLWidget, protected QOpenGLFunctions {
+public:
+    explicit MpvVideoWidget(QWidget* parent, bool verifyRenderedFrames)
+        : QOpenGLWidget(parent), verifyRenderedFrames_(verifyRenderedFrames) {
+        setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
+        setAutoFillBackground(false);
+        setMouseTracking(true);
+    }
+
+    ~MpvVideoWidget() override { DetachEngine(); }
+
+    void AttachEngine(MpvEngine& engine) {
+        engine_ = &engine;
+        presentedFrame_.store(false);
+        renderedFrame_.store(false);
+        if (!engine_->UsesOpenGlRenderApi() || rendererReady_ || !isValid()) return;
+        makeCurrent();
+        try {
+            CreateRenderer();
+        } catch (...) {
+            doneCurrent();
+            engine_ = nullptr;
+            throw;
+        }
+        doneCurrent();
+        update();
+    }
+
+    void DetachEngine() noexcept {
+        if (!engine_ || !rendererReady_) { engine_ = nullptr; return; }
+        makeCurrent();
+        engine_->DestroyOpenGlRenderContext();
+        rendererReady_ = false;
+        doneCurrent();
+        engine_ = nullptr;
+    }
+
+    void ResetPresentedFrame() noexcept { presentedFrame_.store(false); renderedFrame_.store(false); }
+    [[nodiscard]] bool HasPresentedFrame() const noexcept { return presentedFrame_.load(); }
+    [[nodiscard]] bool HasRenderedFrame() const noexcept { return renderedFrame_.load(); }
+
+protected:
+    void initializeGL() override {
+        initializeOpenGLFunctions();
+        connect(context(), &QOpenGLContext::aboutToBeDestroyed, this, [this] {
+            if (engine_ && rendererReady_) {
+                makeCurrent();
+                engine_->DestroyOpenGlRenderContext();
+                rendererReady_ = false;
+                doneCurrent();
+            }
+        }, Qt::DirectConnection);
+        if (engine_ && engine_->UsesOpenGlRenderApi()) CreateRenderer();
+    }
+
+    void paintGL() override {
+        glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (!engine_ || !rendererReady_) return;
+        while (glGetError() != GL_NO_ERROR) {}
+        const qreal scale = devicePixelRatioF();
+        const int pixelWidth = std::max(1, qRound(static_cast<qreal>(width()) * scale));
+        const int pixelHeight = std::max(1, qRound(static_cast<qreal>(height()) * scale));
+        try {
+            if (engine_->RenderOpenGl(static_cast<int>(defaultFramebufferObject()),
+                                      pixelWidth, pixelHeight)) presentedFrame_.store(true);
+            if (verifyRenderedFrames_ && !renderedFrame_.load()) {
+                glBindFramebuffer(GL_FRAMEBUFFER, defaultFramebufferObject());
+                const std::array<QPoint, 5> samples{
+                    QPoint(pixelWidth / 2, pixelHeight / 2),
+                    QPoint(pixelWidth / 4, pixelHeight / 4),
+                    QPoint(pixelWidth * 3 / 4, pixelHeight / 4),
+                    QPoint(pixelWidth / 4, pixelHeight * 3 / 4),
+                    QPoint(pixelWidth * 3 / 4, pixelHeight * 3 / 4)
+                };
+                for (const auto& sample : samples) {
+                    std::array<GLubyte, 4> pixel{};
+                    glReadPixels(sample.x(), sample.y(), 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data());
+                    if (pixel[0] > 4 || pixel[1] > 4 || pixel[2] > 4) {
+                        renderedFrame_.store(true);
+                        break;
+                    }
+                }
+            }
+        } catch (...) {
+            // Rendering errors are surfaced by the libmpv event/log path. Do
+            // not throw through Qt's paint dispatch.
+        }
+    }
+
+private:
+    static void* ResolveOpenGlFunction(void*, const char* name) {
+        auto* current = QOpenGLContext::currentContext();
+        if (!current || !name) return nullptr;
+        const auto address = current->getProcAddress(QByteArray(name));
+        static_assert(sizeof(address) == sizeof(void*));
+        return std::bit_cast<void*>(address);
+    }
+
+    static void RequestUpdate(void* context) {
+        auto* widget = static_cast<MpvVideoWidget*>(context);
+        if (!widget) return;
+        QMetaObject::invokeMethod(widget, [widget] { widget->update(); }, Qt::QueuedConnection);
+    }
+
+    void CreateRenderer() {
+        if (!engine_ || rendererReady_) return;
+        mpv_opengl_init_params initialization{&ResolveOpenGlFunction, nullptr};
+        engine_->CreateOpenGlRenderContext(&initialization, &RequestUpdate, this);
+        rendererReady_ = true;
+    }
+
+    MpvEngine* engine_{nullptr};
+    bool rendererReady_{false};
+    bool verifyRenderedFrames_{false};
+    std::atomic_bool presentedFrame_{false};
+    std::atomic_bool renderedFrame_{false};
+};
+
 QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger, bool backgroundTest)
     : paths_(std::move(paths)), config_(std::move(config)), logger_(logger),
       shaders_(paths_.shaders, paths_.presets / "shaders.json"),
@@ -263,7 +387,6 @@ QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger, bo
     ApplyTheme();
     qApp->installEventFilter(this);
     LogHardwareInformation();
-    StartEngineInitialization();
 }
 
 QtPlayerWindow::~QtPlayerWindow() {
@@ -271,19 +394,16 @@ QtPlayerWindow::~QtPlayerWindow() {
     qApp->removeEventFilter(this);
     if (resolverThread_.joinable()) { resolverThread_.request_stop(); resolverThread_.join(); }
     if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
+    videoSurface_->DetachEngine();
     engine_.Shutdown();
 }
 
 void QtPlayerWindow::BuildUi() {
-    videoSurface_ = new QWidget(this);
+    videoSurface_ = new MpvVideoWidget(this, backgroundTest_);
     videoSurface_->setObjectName(QStringLiteral("videoSurface"));
-    videoSurface_->setAttribute(Qt::WA_NativeWindow, true);
-    videoSurface_->setMouseTracking(true);
-    (void)videoSurface_->winId();
 
     controls_ = new QFrame(this);
     controls_->setObjectName(QStringLiteral("controls"));
-    controls_->setAttribute(Qt::WA_NativeWindow, true);
     controls_->setMouseTracking(true);
     auto* controlsLayout = new QVBoxLayout(controls_);
     controlsLayout->setContentsMargins(18, 10, 18, 10);
@@ -336,7 +456,6 @@ void QtPlayerWindow::BuildUi() {
 
     emptyState_ = new QFrame(this);
     emptyState_->setObjectName(QStringLiteral("emptyState"));
-    emptyState_->setAttribute(Qt::WA_NativeWindow, true);
     auto* emptyLayout = new QVBoxLayout(emptyState_);
     emptyLayout->setContentsMargins(34, 28, 34, 28);
     emptyLayout->setSpacing(9);
@@ -360,16 +479,27 @@ void QtPlayerWindow::BuildUi() {
     emptyLayout->addWidget(emptyTitle); emptyLayout->addWidget(emptyHint); emptyLayout->addSpacing(8);
     emptyLayout->addLayout(emptyButtons);
 
+    openingState_ = new QFrame(this);
+    openingState_->setObjectName(QStringLiteral("openingState"));
+    auto* openingLayout = new QVBoxLayout(openingState_);
+    openingLayout->setContentsMargins(28, 22, 28, 22);
+    openingLayout->setSpacing(8);
+    openingTitle_ = new QLabel(QStringLiteral("Opening video"), openingState_);
+    openingTitle_->setObjectName(QStringLiteral("openingTitle"));
+    openingStatus_ = new QLabel(QStringLiteral("Preparing playback…"), openingState_);
+    openingStatus_->setObjectName(QStringLiteral("mutedText"));
+    openingStatus_->setWordWrap(true);
+    openingLayout->addWidget(openingTitle_);
+    openingLayout->addWidget(openingStatus_);
+
     statistics_ = new QLabel(this);
     statistics_->setObjectName(QStringLiteral("statistics"));
     statistics_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     statistics_->setWordWrap(false);
     statistics_->hide();
-    statistics_->setAttribute(Qt::WA_NativeWindow, true);
 
     overlay_ = new QFrame(this);
     overlay_->setObjectName(QStringLiteral("overlayPanel"));
-    overlay_->setAttribute(Qt::WA_NativeWindow, true);
     auto* overlayLayout = new QVBoxLayout(overlay_);
     overlayLayout->setContentsMargins(28, 26, 28, 24);
     overlayLayout->setSpacing(11);
@@ -394,7 +524,6 @@ void QtPlayerWindow::BuildUi() {
 
     sourcePanel_ = new QFrame(this);
     sourcePanel_->setObjectName(QStringLiteral("sourcePanel"));
-    sourcePanel_->setAttribute(Qt::WA_NativeWindow, true);
     auto* sourceLayout = new QVBoxLayout(sourcePanel_);
     sourceLayout->setContentsMargins(30, 26, 30, 24);
     sourceLayout->setSpacing(13);
@@ -508,9 +637,10 @@ void QtPlayerWindow::ApplyTheme() {
         QLabel#emptyTitle, QLabel#panelTitle { font-size: 24px; font-weight: 600; }
         QLabel#mutedText { color: #a2a2aa; }
         QLabel#timeLabel { color: #ededf0; font-variant-numeric: tabular-nums; }
-        QFrame#emptyState, QFrame#overlayPanel, QFrame#sourcePanel {
+        QFrame#emptyState, QFrame#openingState, QFrame#overlayPanel, QFrame#sourcePanel {
             background: #0b0b0e; border: 1px solid #36363d; border-radius: 22px;
         }
+        QLabel#openingTitle { font-size: 18px; font-weight: 600; }
         QLabel#statistics { background: rgba(7, 7, 9, 230); border: 1px solid #34343a;
                             border-radius: 14px; padding: 14px; color: #e8e8ec;
                             font-family: "Cascadia Mono", "Consolas"; font-size: 12px; }
@@ -543,6 +673,9 @@ void QtPlayerWindow::LayoutOverlays() {
     const QSize emptySize(std::min(520, std::max(320, width() - 48)), 252);
     emptyState_->setGeometry((width() - emptySize.width()) / 2, (height() - emptySize.height()) / 2,
                              emptySize.width(), emptySize.height());
+    const QSize openingSize(std::min(440, std::max(320, width() - 48)), 112);
+    openingState_->setGeometry((width() - openingSize.width()) / 2, (height() - openingSize.height()) / 2,
+                               openingSize.width(), openingSize.height());
     const int preferredOverlayHeight = overlayMode_ == OverlayMode::Url ? 270 :
                                        overlayMode_ == OverlayMode::Message ? 260 : 540;
     const int preferredOverlayWidth = overlayMode_ == OverlayMode::Choice ? 720 : 660;
@@ -558,6 +691,7 @@ void QtPlayerWindow::LayoutOverlays() {
                              std::min(350, std::max(220, height() - 36)));
     videoSurface_->lower();
     if (emptyState_->isVisible()) emptyState_->raise();
+    if (openingState_->isVisible()) openingState_->raise();
     if (controls_->isVisible()) controls_->raise();
     if (statistics_->isVisible()) statistics_->raise();
     if (sourcePanel_->isVisible()) sourcePanel_->raise();
@@ -566,6 +700,7 @@ void QtPlayerWindow::LayoutOverlays() {
 
 void QtPlayerWindow::UpdateVisibility() {
     emptyState_->setVisible(!mediaLoaded_ && !mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    openingState_->setVisible(mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
     controls_->setVisible(mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
     sourcePanel_->setVisible(sourceSelection_.has_value());
     overlay_->setVisible(overlayMode_ != OverlayMode::None);
@@ -627,6 +762,9 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             *result = providers;
             return true;
         }
+        case 10:
+            *result = videoSurface_->HasRenderedFrame() ? 1 : 0;
+            return true;
         default:
             break;
         }
@@ -639,7 +777,14 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 2: HideOverlay(); break;
         case 3: ShowControls(true, false); break;
         case 4: ShowControls(false, false); break;
-        case 5: close(); break;
+        case 5:
+            // This command is delivered with SendMessage from the background
+            // smoke process. Closing synchronously from inside nativeEvent()
+            // lets QApplication tear down the Windows platform plugin before
+            // qwindows has returned from its native-message dispatch. Queue
+            // the close so the native callback can unwind first.
+            QTimer::singleShot(0, this, [this] { close(); });
+            break;
         case 6:
             timeline_->setValue(5000);
             SeekFromSlider(true);
@@ -700,6 +845,16 @@ bool QtPlayerWindow::eventFilter(QObject* watched, QEvent* event) {
     return false;
 }
 
+void QtPlayerWindow::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    LayoutOverlays();
+    // Defer libmpv initialization until the first shown event-loop turn so
+    // QOpenGLWidget has created its GUI-thread-owned context and framebuffer.
+    QTimer::singleShot(0, this, [this] {
+        if (!closing_.load()) StartEngineInitialization();
+    });
+}
+
 void QtPlayerWindow::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     LayoutOverlays();
@@ -708,9 +863,19 @@ void QtPlayerWindow::resizeEvent(QResizeEvent* event) {
 void QtPlayerWindow::closeEvent(QCloseEvent* event) {
     closing_.store(true);
     if (resolverThread_.joinable()) resolverThread_.request_stop();
-    if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
-    engine_.Shutdown();
+    // The Render API belongs to QOpenGLWidget's context. Release it while the
+    // widget is still shown and the GUI event loop is active; after this there
+    // is no foreign child HWND, so teardown cannot re-enter qwindows.
+    hideTimer_->stop();
+    uiTimer_->stop();
+    controlsAnimation_->stop();
+    if (engineReady_) {
+        videoSurface_->DetachEngine();
+        engine_.Shutdown();
+        engineReady_ = false;
+    }
     QWidget::closeEvent(event);
+    QTimer::singleShot(0, qApp, &QCoreApplication::quit);
 }
 
 void QtPlayerWindow::dragEnterEvent(QDragEnterEvent* event) {
@@ -774,13 +939,15 @@ void QtPlayerWindow::keyPressEvent(QKeyEvent* event) {
 
 void QtPlayerWindow::StartEngineInitialization() {
     if (engineReady_ || engineInitializationThread_.joinable()) return;
+    if (!isVisible()) return;
+    LayoutOverlays();
     {
         std::scoped_lock lock(engineInitializationMutex_);
         engineInitializationError_.reset();
     }
     engineInitializationThread_ = std::jthread([this] {
         try {
-            engine_.Initialize(static_cast<std::uintptr_t>(videoSurface_->winId()), [this](PlaybackEvent event) {
+            engine_.Initialize(0, [this](PlaybackEvent event) {
                 if (closing_.load()) return;
                 QMetaObject::invokeMethod(this, [this, event = std::move(event)]() mutable {
                     if (!closing_.load()) HandlePlaybackEvent(std::move(event));
@@ -819,6 +986,20 @@ void QtPlayerWindow::HandleEngineInitialized() {
         return;
     }
     engineReady_ = true;
+    try {
+        if (engine_.UsesOpenGlRenderApi()) videoSurface_->AttachEngine(engine_);
+    } catch (const std::exception& rendererError) {
+        logger_.Write(LogLevel::Error, "playback", std::string("OpenGL renderer initialization failed: ") +
+                                                     rendererError.what());
+        engineReady_ = false;
+        engine_.Shutdown();
+        pendingMedia_.reset();
+        mediaOpening_ = false;
+        setWindowTitle(QStringLiteral("WannaViewer"));
+        UpdateVisibility();
+        ShowError(QStringLiteral("Playback"), rendererError.what());
+        return;
+    }
     if (!pendingMedia_) return;
     auto media = std::move(*pendingMedia_);
     pendingMedia_.reset();
@@ -851,9 +1032,16 @@ void QtPlayerWindow::OpenMedia(std::string value,
     if (sourceSelection_) HideSourceSelector();
     if (overlayMode_ != OverlayMode::None) HideOverlay();
     mediaOpening_ = true;
+    playbackClockAdvanced_ = false;
     playbackStarted_ = false;
     startupTimeoutReported_ = false;
     playbackLoadStarted_ = std::chrono::steady_clock::now();
+    const auto parsedMedia = Url::Parse(value);
+    playbackStartupTimeout_ = parsedMedia && (parsedMedia->IsHttp() || parsedMedia->IsHttps())
+        ? std::chrono::seconds(60) : std::chrono::seconds(30);
+    videoSurface_->ResetPresentedFrame();
+    openingStatus_->setText(engineReady_ ? QStringLiteral("Loading and decoding the first frame…")
+                                         : QStringLiteral("Starting the video engine…"));
     setWindowTitle(engineReady_ ? QStringLiteral("WannaViewer — opening…")
                                 : QStringLiteral("WannaViewer — preparing player…"));
     UpdateVisibility();
@@ -1167,7 +1355,10 @@ bool QtPlayerWindow::RetryBrowserProvider() {
 void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
     switch (event.type) {
     case PlaybackEventType::StartFile:
+        logger_.Write(LogLevel::Info, "playback", "mpv started opening media");
+        playbackClockAdvanced_ = false;
         playbackStarted_ = false;
+        videoSurface_->ResetPresentedFrame();
         startupTimeoutReported_ = false;
         playbackLoadStarted_ = std::chrono::steady_clock::now();
         setWindowTitle(QStringLiteral("WannaViewer — opening…"));
@@ -1177,24 +1368,16 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         UpdateTracks();
         break;
     case PlaybackEventType::FileLoaded:
+        logger_.Write(LogLevel::Info, "playback", "media metadata and tracks loaded");
         SetMediaLoaded(true);
         setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark buffering")
                                       : QStringLiteral("WannaViewer — buffering…"));
         if (benchmarkMode_ && benchmarkProfile_ == "hardware-shader") ApplyShaderHotkey(2);
         break;
     case PlaybackEventType::PlaybackStarted:
-        playbackStarted_ = true;
-        browserRetryUrl_.clear(); browserRetryHeaders_.clear(); browserRetriesRemaining_ = 0;
-        setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark running")
-                                      : QStringLiteral("WannaViewer — playing"));
-        if (benchmarkMode_ && !benchmarkRunning_) {
-            benchmarkSamples_.clear();
-            benchmarkDroppedBaseline_ = benchmarkDelayedBaseline_ = -1;
-            benchmarkStart_ = std::chrono::steady_clock::now();
-            lastBenchmarkSample_ = benchmarkStart_;
-            benchmarkRunning_ = true;
-        }
-        RecordInteraction();
+        logger_.Write(LogLevel::Info, "playback", "playback clock advanced");
+        playbackClockAdvanced_ = true;
+        UpdatePlaybackStartedState();
         break;
     case PlaybackEventType::EndFile:
         if (benchmarkRunning_) FinishBenchmark();
@@ -1211,6 +1394,25 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
     case PlaybackEventType::PropertyChanged:
         break;
     }
+}
+
+void QtPlayerWindow::UpdatePlaybackStartedState() {
+    if (playbackStarted_ || !playbackClockAdvanced_) return;
+    if (engine_.UsesOpenGlRenderApi() && !videoTrackIds_.empty() && !videoSurface_->HasPresentedFrame()) return;
+    playbackStarted_ = true;
+    logger_.Write(LogLevel::Info, "playback", engine_.UsesOpenGlRenderApi() && !videoTrackIds_.empty()
+        ? "first video frame reached the Qt framebuffer" : "playback started without a video track");
+    browserRetryUrl_.clear(); browserRetryHeaders_.clear(); browserRetriesRemaining_ = 0;
+    setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark running")
+                                  : QStringLiteral("WannaViewer — playing"));
+    if (benchmarkMode_ && !benchmarkRunning_) {
+        benchmarkSamples_.clear();
+        benchmarkDroppedBaseline_ = benchmarkDelayedBaseline_ = -1;
+        benchmarkStart_ = std::chrono::steady_clock::now();
+        lastBenchmarkSample_ = benchmarkStart_;
+        benchmarkRunning_ = true;
+    }
+    RecordInteraction();
 }
 
 void QtPlayerWindow::SetMediaLoaded(bool loaded) {
@@ -1243,16 +1445,23 @@ void QtPlayerWindow::SetMediaLoaded(bool loaded) {
 
 void QtPlayerWindow::UpdateUi() {
     if (!engineReady_) return;
+    // Audio time can advance before Qt receives a renderable video frame.
+    UpdatePlaybackStartedState();
     const auto steadyNow = std::chrono::steady_clock::now();
     if ((mediaOpening_ || mediaLoaded_) && !playbackStarted_ && !startupTimeoutReported_ &&
-        steadyNow - playbackLoadStarted_ > std::chrono::seconds(30)) {
+        steadyNow - playbackLoadStarted_ > playbackStartupTimeout_) {
+        const bool sourceOpened = mediaLoaded_;
         startupTimeoutReported_ = true;
         engine_.Stop();
         SetMediaLoaded(false);
         if (RetryBrowserProvider()) return;
         setWindowTitle(QStringLiteral("WannaViewer"));
-        ShowError(QStringLiteral("Playback"),
-                  "Playback did not produce a frame within 30 seconds. The stream may have expired or rejected its media segments.");
+        const auto timeoutSeconds = playbackStartupTimeout_.count();
+        ShowError(QStringLiteral("Playback"), sourceOpened
+            ? std::format("The media opened, but no video frame reached the renderer within {} seconds. "
+                          "The player was reset; details are in logs/wannaviewer.log.", timeoutSeconds)
+            : std::format("The media source did not finish opening within {} seconds. It may be unavailable, "
+                          "expired, or rejecting the request; details are in logs/wannaviewer.log.", timeoutSeconds));
         return;
     }
     const double duration = engine_.Duration();

@@ -36,10 +36,13 @@ class QMouseEvent;
 class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
+class QShowEvent;
 class QSlider;
 class QTimer;
 
 namespace wannaviewer {
+
+class MpvVideoWidget;
 
 class QtPlayerWindow final : public QWidget {
 public:
@@ -55,6 +58,7 @@ public:
 protected:
     bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
@@ -97,6 +101,7 @@ private:
     void OpenVariant(const StreamVariant& stream);
     bool RetryBrowserProvider();
     void HandlePlaybackEvent(PlaybackEvent event);
+    void UpdatePlaybackStartedState();
     void SetMediaLoaded(bool loaded);
     void UpdateUi();
     void UpdateTracks();
@@ -132,7 +137,7 @@ private:
     ResolverPipeline resolvers_;
     MpvEngine engine_;
 
-    QWidget* videoSurface_{nullptr};
+    MpvVideoWidget* videoSurface_{nullptr};
     QFrame* controls_{nullptr};
     QSlider* timeline_{nullptr};
     QSlider* volume_{nullptr};
@@ -158,6 +163,9 @@ private:
     QPushButton* emptyPlayIcon_{nullptr};
     QPushButton* openFileButton_{nullptr};
     QPushButton* openUrlButton_{nullptr};
+    QFrame* openingState_{nullptr};
+    QLabel* openingTitle_{nullptr};
+    QLabel* openingStatus_{nullptr};
 
     QFrame* overlay_{nullptr};
     QLabel* overlayTitle_{nullptr};
@@ -205,6 +213,7 @@ private:
     bool engineReady_{false};
     bool mediaOpening_{false};
     bool mediaLoaded_{false};
+    bool playbackClockAdvanced_{false};
     bool playbackStarted_{false};
     bool startupTimeoutReported_{false};
     bool controlsVisible_{true};
@@ -221,6 +230,7 @@ private:
     HeaderMap browserRetryHeaders_;
     unsigned browserRetriesRemaining_{0};
     std::chrono::steady_clock::time_point playbackLoadStarted_{};
+    std::chrono::seconds playbackStartupTimeout_{30};
     std::chrono::steady_clock::time_point lastStatisticsUpdate_{};
     std::chrono::steady_clock::time_point lastBenchmarkSample_{};
     std::chrono::steady_clock::time_point benchmarkStart_{};

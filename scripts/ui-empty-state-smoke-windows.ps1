@@ -11,6 +11,7 @@ using System.Runtime.InteropServices;
 public static class WannaViewerEmptySmokeNative {
     public delegate bool EnumProcedure(IntPtr window, IntPtr data);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProcedure callback, IntPtr data);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProcedure callback, IntPtr data);
     [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr window);
@@ -21,6 +22,8 @@ public static class WannaViewerEmptySmokeNative {
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr window, IntPtr region);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr window, ref POINT point);
+    [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr parent, POINT point, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr value);
@@ -105,6 +108,18 @@ try {
         if ($rect.Left -lt $mainRect.Left -or $rect.Top -lt $mainRect.Top -or
             $rect.Right -gt $mainRect.Right -or $rect.Bottom -gt $mainRect.Bottom) {
             throw "Control $id extends outside the player window"
+        }
+    }
+    foreach ($id in @(111,112)) {
+        $buttonRect = [WannaViewerEmptySmokeNative+RECT]::new()
+        [void][WannaViewerEmptySmokeNative]::GetWindowRect($controls[$id], [ref]$buttonRect)
+        $buttonCenter = [WannaViewerEmptySmokeNative+POINT]::new()
+        $buttonCenter.X = [int](($buttonRect.Left + $buttonRect.Right) / 2)
+        $buttonCenter.Y = [int](($buttonRect.Top + $buttonRect.Bottom) / 2)
+        [void][WannaViewerEmptySmokeNative]::ScreenToClient($main, [ref]$buttonCenter)
+        $hit = [WannaViewerEmptySmokeNative]::ChildWindowFromPointEx($main, $buttonCenter, 0)
+        if ($hit -ne $controls[$id]) {
+            throw "Empty-state button $id is covered by another child window"
         }
     }
     foreach ($id in @(111,112,114)) { Assert-NoBinaryRegion $controls[$id] "Empty-state control $id" }

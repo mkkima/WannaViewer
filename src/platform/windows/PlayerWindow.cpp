@@ -772,6 +772,22 @@ void PlayerWindow::CreateControls() {
     EnableWindow(sourceOpenButton_, FALSE);
     SetWindowPos(video_, HWND_BOTTOM, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    // Establish sibling layers once before the main window is shown. Background
+    // surfaces must stay below their interactive content without reordering every frame.
+    for (HWND control : {controlsBar_, emptyState_, openFileButton_, openUrlButton_,
+                         playButton_, rewindButton_, forwardButton_, muteButton_, timeline_,
+                         timeLabel_, volume_, audio_, subtitles_, videoQuality_, shader_,
+                         statsButton_, fullscreenButton_, settingsButton_, stats_,
+                         sourcePanel_, sourceTitle_, sourceSubtitle_, sourceSeasonLabel_,
+                         sourceVoiceLabel_, sourceEpisodeLabel_, sourceStreamLabel_,
+                         sourceSeasonList_, sourceVoiceList_, sourceEpisodeList_, sourceStreamList_,
+                         sourceStatus_, sourceOpenButton_, sourceCancelButton_,
+                         overlayPanel_, overlayTitle_, overlayBody_, overlayEdit_, overlayList_,
+                         overlayPrimaryButton_, overlaySecondaryButton_}) {
+        if (control)
+            SetWindowPos(control, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
     LayoutControls();
 }
 

@@ -300,6 +300,55 @@ void ApplyWindowLayout(HWND parent,
     if (!EndDeferWindowPos(deferred)) applyIndividually();
 }
 
+class BufferedDrawSurface final {
+public:
+    BufferedDrawSurface(HDC target, RECT bounds) : target_(target), bounds_(bounds) {
+        const int width = bounds_.right - bounds_.left;
+        const int height = bounds_.bottom - bounds_.top;
+        if (!target_ || width <= 0 || height <= 0) return;
+        buffer_ = CreateCompatibleDC(target_);
+        if (!buffer_) return;
+        bitmap_ = CreateCompatibleBitmap(target_, width, height);
+        if (!bitmap_) {
+            DeleteDC(buffer_);
+            buffer_ = nullptr;
+            return;
+        }
+        previousBitmap_ = SelectObject(buffer_, bitmap_);
+        if (!previousBitmap_ || previousBitmap_ == HGDI_ERROR) {
+            DeleteObject(bitmap_);
+            DeleteDC(buffer_);
+            bitmap_ = nullptr;
+            buffer_ = nullptr;
+            previousBitmap_ = nullptr;
+            return;
+        }
+        SetWindowOrgEx(buffer_, bounds_.left, bounds_.top, nullptr);
+    }
+
+    ~BufferedDrawSurface() {
+        if (!buffer_) return;
+        BitBlt(target_, bounds_.left, bounds_.top,
+               bounds_.right - bounds_.left, bounds_.bottom - bounds_.top,
+               buffer_, bounds_.left, bounds_.top, SRCCOPY);
+        SelectObject(buffer_, previousBitmap_);
+        DeleteObject(bitmap_);
+        DeleteDC(buffer_);
+    }
+
+    BufferedDrawSurface(const BufferedDrawSurface&) = delete;
+    BufferedDrawSurface& operator=(const BufferedDrawSurface&) = delete;
+
+    [[nodiscard]] HDC Dc() const noexcept { return buffer_ ? buffer_ : target_; }
+
+private:
+    HDC target_{nullptr};
+    RECT bounds_{};
+    HDC buffer_{nullptr};
+    HBITMAP bitmap_{nullptr};
+    HGDIOBJ previousBitmap_{nullptr};
+};
+
 std::wstring Utf8ToWide(std::string_view value) {
     if (value.empty()) return {};
     const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
@@ -614,7 +663,7 @@ void PlayerWindow::CreateControls() {
     timeline_ = CreateWindowExW(0, TRACKBAR_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
                                 0, 0, 200, 24, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTimeline)), instance_, nullptr);
     SendMessageW(timeline_, TBM_SETRANGE, TRUE, MAKELONG(0, 10000));
-    timeLabel_ = CreateWindowExW(WS_EX_TRANSPARENT, L"STATIC", L"00:00  /  00:00", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_CENTER | SS_CENTERIMAGE,
+    timeLabel_ = CreateWindowExW(0, L"STATIC", L"00:00  /  00:00", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SS_CENTER | SS_CENTERIMAGE,
                                  0, 0, 112, 28, window_, nullptr, instance_, nullptr);
     volume_ = CreateWindowExW(0, TRACKBAR_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
                               0, 0, 80, 24, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kVolume)), instance_, nullptr);
@@ -636,7 +685,7 @@ void PlayerWindow::CreateControls() {
     sourcePanel_ = CreateWindowExW(0, L"STATIC", nullptr, WS_CHILD | WS_CLIPSIBLINGS | SS_OWNERDRAW,
                                    0, 0, 100, 100, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kSourcePanel)), instance_, nullptr);
     const auto createSourceLabel = [this](int id, const wchar_t* text, DWORD style) {
-        return CreateWindowExW(WS_EX_TRANSPARENT, L"STATIC", text, WS_CHILD | WS_CLIPSIBLINGS | style,
+        return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_CLIPSIBLINGS | style,
                                0, 0, 100, 24, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
     };
     sourceTitle_ = createSourceLabel(kSourceTitle, L"Choose a playback source", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS);
@@ -761,13 +810,13 @@ void PlayerWindow::CreateFonts() {
     if (font_) DeleteObject(font_);
     if (iconFont_) DeleteObject(iconFont_);
     if (titleFont_) DeleteObject(titleFont_);
-    font_ = CreateFontW(-Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+    font_ = CreateFontW(-Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     iconFont_ = CreateFontW(-Scale(11), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
-    titleFont_ = CreateFontW(-Scale(26), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Display");
+                            OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    titleFont_ = CreateFontW(-Scale(26), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     for (HWND control : {playButton_, rewindButton_, forwardButton_, muteButton_, timeLabel_, audio_, subtitles_, videoQuality_, shader_, statsButton_,
                          fullscreenButton_, settingsButton_, stats_, openFileButton_, openUrlButton_, sourceTitle_,
                          sourceSubtitle_, sourceSeasonLabel_, sourceVoiceLabel_, sourceEpisodeLabel_, sourceStreamLabel_,
@@ -1968,8 +2017,10 @@ void PlayerWindow::DrawPlayerIcon(HDC dc, UINT id, const RECT& rectangle, bool e
     }
 }
 
-LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
+LRESULT PlayerWindow::DrawControl(DRAWITEMSTRUCT item) {
     if (!item.hDC || !item.hwndItem) return FALSE;
+    BufferedDrawSurface surface(item.hDC, item.rcItem);
+    item.hDC = surface.Dc();
     RECT rectangle = item.rcItem;
     if (item.CtlType == ODT_LISTBOX && IsStyledListId(item.CtlID)) {
         const bool selected = (item.itemState & ODS_SELECTED) != 0;
@@ -2113,10 +2164,12 @@ LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
     return TRUE;
 }
 
-LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW& customDraw) {
+LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW customDraw) {
     if (customDraw.dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
     RECT client{};
     GetClientRect(customDraw.hdr.hwndFrom, &client);
+    BufferedDrawSurface surface(customDraw.hdc, client);
+    customDraw.hdc = surface.Dc();
     FillRect(customDraw.hdc, &client, panelBrush_);
     const bool timeline = customDraw.hdr.hwndFrom == timeline_;
     const bool enabled = IsWindowEnabled(customDraw.hdr.hwndFrom) != FALSE;

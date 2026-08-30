@@ -100,8 +100,8 @@ private:
     void ShowError(std::wstring_view title, std::string_view detail);
     void LogHardwareInformation();
     void FinishBenchmark();
-    LRESULT DrawControl(const DRAWITEMSTRUCT& item);
-    LRESULT DrawTrackbar(NMCUSTOMDRAW& customDraw);
+    LRESULT DrawControl(DRAWITEMSTRUCT item);
+    LRESULT DrawTrackbar(NMCUSTOMDRAW customDraw);
     void DrawPlayerIcon(HDC dc, UINT id, const RECT& rectangle, bool enabled);
     [[nodiscard]] int Scale(int value) const noexcept;
 

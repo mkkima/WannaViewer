@@ -87,7 +87,9 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         // Fill the video surface while preserving the source aspect ratio.
         // mpv crops only the overflow instead of adding pillarbox/letterbox bars.
         SetRequiredOption("panscan", "1.0");
-        SetRequiredOption("vo", "gpu-next");
+        auto videoOutput = config_.GetString("playback.vo", "gpu-next");
+        if (videoOutput != "gpu-next" && videoOutput != "null") videoOutput = "gpu-next";
+        SetRequiredOption("vo", videoOutput);
         SetRequiredOption("hwdec", config_.GetString("playback.hwdec", "auto"));
         SetRequiredOption("interpolation", "no");
         SetRequiredOption("video-sync", config_.GetString("playback.video_sync", "display-resample"));
@@ -108,15 +110,18 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         SetRequiredOption("gpu-shader-cache", "yes");
         SetRequiredOption("gpu-shader-cache-dir", paths_.cache.string());
         SetRequiredOption("target-colorspace-hint", "yes");
+        if (videoOutput != "null") {
 #ifdef _WIN32
-        SetRequiredOption("gpu-api", "d3d11");
-        SetRequiredOption("gpu-context", "d3d11");
-        SetRequiredOption("d3d11-output-format", "auto");
-        SetRequiredOption("d3d11-output-csp", "auto");
+            SetRequiredOption("gpu-api", "d3d11");
+            SetRequiredOption("gpu-context", "d3d11");
+            SetRequiredOption("d3d11-output-format", "auto");
+            SetRequiredOption("d3d11-output-csp", "auto");
 #endif
-        std::int64_t window = static_cast<std::int64_t>(nativeWindow);
-        const int windowResult = api_.SetOption(handle_, "wid", MPV_FORMAT_INT64, &window);
-        if (windowResult < 0) throw std::runtime_error(std::string("Unable to set mpv window: ") + api_.ErrorString(windowResult));
+            std::int64_t window = static_cast<std::int64_t>(nativeWindow);
+            const int windowResult = api_.SetOption(handle_, "wid", MPV_FORMAT_INT64, &window);
+            if (windowResult < 0)
+                throw std::runtime_error(std::string("Unable to set mpv window: ") + api_.ErrorString(windowResult));
+        }
 
         const int result = api_.Initialize(handle_);
         if (result < 0) throw std::runtime_error(std::string("mpv_initialize failed: ") + api_.ErrorString(result));
@@ -131,13 +136,15 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
 #ifdef _WIN32
         logger_.Write(LogLevel::Info, "playback",
                       std::format("libmpv initialized in {} ms (DLL {} ms, core {} ms): "
-                                  "gpu-next, hwdec=auto, D3D11 output",
+                                  "{}, hwdec={}, {}",
                                   std::chrono::duration_cast<std::chrono::milliseconds>(
                                       coreInitialized - initializationStarted).count(),
                                   std::chrono::duration_cast<std::chrono::milliseconds>(
                                       libraryLoaded - initializationStarted).count(),
                                   std::chrono::duration_cast<std::chrono::milliseconds>(
-                                      coreInitialized - libraryLoaded).count()));
+                                      coreInitialized - libraryLoaded).count(),
+                                  videoOutput, config_.GetString("playback.hwdec", "auto"),
+                                  videoOutput == "null" ? "headless output" : "D3D11 output"));
 #else
         logger_.Write(LogLevel::Info, "playback",
                       std::format("libmpv initialized in {} ms (library {} ms, core {} ms): "

@@ -11,7 +11,7 @@ Install Visual Studio with the Desktop development with C++ workload, CMake
 
 The script performs these fail-fast steps:
 
-1. downloads pinned libmpv, Anime4K, and yt-dlp artifacts;
+1. downloads pinned libmpv, Qt 6, Anime4K, and yt-dlp artifacts;
 2. verifies every SHA-256 digest;
 3. configures and builds with C++23, `/W4 /WX`, Control Flow Guard-compatible
    linker settings, DEP, ASLR, and release LTO when supported;

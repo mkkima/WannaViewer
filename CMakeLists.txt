@@ -58,6 +58,7 @@ else()
 endif()
 
 if(WIN32)
+  find_package(Qt6 6.8.3 REQUIRED COMPONENTS Widgets)
   FetchContent_Declare(
     webview2_sdk
     URL https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4129.50/microsoft.web.webview2.1.0.4129.50.nupkg
@@ -87,14 +88,14 @@ if(WIN32)
   target_include_directories(wannaviewer_core PRIVATE "${WANNAVIEWER_WEBVIEW2_INCLUDE_DIR}")
   target_link_libraries(wannaviewer_core PUBLIC winhttp pathcch psapi "${WANNAVIEWER_WEBVIEW2_IMPORT_LIBRARY}")
 
-  add_executable(WannaViewer WIN32
+  qt_add_executable(WannaViewer WIN32
     src/platform/windows/Main.cpp
-    src/platform/windows/PlayerWindow.cpp
+    src/platform/windows/QtPlayerWindow.cpp
     resources/windows/WannaViewer.rc
     resources/windows/app.manifest
   )
   set_target_properties(WannaViewer PROPERTIES OUTPUT_NAME "player")
-  target_link_libraries(WannaViewer PRIVATE wannaviewer_core comctl32 comdlg32 ole32 shell32 shlwapi dwmapi dxgi uxtheme gdiplus)
+  target_link_libraries(WannaViewer PRIVATE wannaviewer_core Qt6::Widgets ole32 shell32 shlwapi dxgi)
   target_compile_options(WannaViewer PRIVATE /W4 /WX /permissive- /EHsc /utf-8 /Zc:__cplusplus /sdl /guard:cf)
   target_link_options(WannaViewer PRIVATE /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf)
 

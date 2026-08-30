@@ -8,6 +8,7 @@
       "binaryDir": "${sourceDir}/build/windows-x64-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_PREFIX_PATH": "${sourceDir}/.deps/qt/6.8.3/msvc2022_64",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
         "WANNAVIEWER_BUILD_TESTS": "ON"
       },

@@ -1,6 +1,6 @@
 # WannaViewer
 
-WannaViewer is a small native frontend for libmpv. Its default playback path is
+WannaViewer is a small Qt Widgets frontend for libmpv. Its default playback path is
 hardware decoding into GPU surfaces, `vo=gpu-next`/libplacebo rendering, and a
 native D3D11 presentation path on Windows. It does not copy decoded frames into
 the application.
@@ -15,9 +15,9 @@ PowerShell 7, and an internet connection for the first dependency bootstrap.
 ./dist/windows-x64/player.exe
 ```
 
-The build script downloads a pinned libmpv development archive, checks its
-SHA-256 digest, builds, tests, and creates the portable directory. No codec pack
-or system mpv installation is used. Kodik/Alloha URL resolution additionally
+The build script downloads pinned libmpv and Qt 6 archives, checks their SHA-256
+digests, builds, tests, and creates the portable directory with the required Qt
+DLLs. No codec pack or system mpv installation is used. Kodik/Alloha URL resolution additionally
 uses the Microsoft Edge WebView2 Evergreen Runtime normally present on Windows
 11; the portable package includes the pinned WebView2 loader, not a fixed-version
 browser runtime.

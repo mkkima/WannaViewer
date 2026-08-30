@@ -1,43 +1,48 @@
-#include "wannaviewer/platform/windows/PlayerWindow.hpp"
+#include "wannaviewer/platform/windows/QtPlayerWindow.hpp"
 
+#include <QApplication>
+#include <QGuiApplication>
+#include <QMessageBox>
+#include <QScreen>
+#include <QStringList>
+
+#include <algorithm>
 #include <exception>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <commctrl.h>
-#include <shellapi.h>
 #include <windows.h>
 
-namespace {
-
-std::string WideToUtf8(std::wstring_view value) {
-    if (value.empty()) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    if (count <= 0) return {};
-    std::string result(static_cast<std::size_t>(count), '\0');
-    (void)WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), result.data(), count, nullptr, nullptr);
-    return result;
-}
-
-} // namespace
-
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+int main(int argumentCount, char** arguments) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
-    InitCommonControlsEx(&controls);
+    QApplication application(argumentCount, arguments);
+    application.setApplicationName(QStringLiteral("WannaViewer"));
+    application.setOrganizationName(QStringLiteral("WannaViewer"));
+    application.setStyle(QStringLiteral("Fusion"));
+
     bool backgroundTest = false;
     try {
         auto paths = wannaviewer::AppPaths::Discover();
         paths.EnsureWritableDirectories();
         auto config = wannaviewer::Config::Load(paths.config / "player.conf");
-        int argumentCount = 0;
-        wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
+        QStringList rawArguments = QCoreApplication::arguments();
+        if (!rawArguments.isEmpty()) rawArguments.removeFirst();
         std::vector<std::string> commandLine;
-        for (int index = 1; arguments && index < argumentCount; ++index) commandLine.push_back(WideToUtf8(arguments[index]));
-        if (arguments) LocalFree(arguments);
+        commandLine.reserve(static_cast<std::size_t>(rawArguments.size()));
+        for (const auto& argument : rawArguments) {
+            const auto bytes = argument.toUtf8();
+            commandLine.emplace_back(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+        }
         backgroundTest = std::erase(commandLine, "--background-ui-test") != 0;
-        bool benchmark = !commandLine.empty() && commandLine.front() == "--benchmark";
+        if (backgroundTest) {
+            // An off-screen HWND has no DXGI output. Keep background automation
+            // completely invisible and exercise demux/decode/UI state with mpv's
+            // null output instead of creating an invalid D3D swap chain.
+            config.Set("playback.vo", "null");
+            config.Set("playback.hwdec", "no");
+        }
+        const bool benchmark = !commandLine.empty() && commandLine.front() == "--benchmark";
         std::string benchmarkMode = "hardware";
         std::string input;
         if (benchmark) {
@@ -52,25 +57,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         } else if (!commandLine.empty()) {
             input = commandLine.front();
         }
+
         wannaviewer::Logger logger;
         logger.Open(paths.logs, wannaviewer::ParseLogLevel(config.GetString("logging.level", "info")),
-                    static_cast<std::uintmax_t>(config.GetInt("logging.max_bytes", 2 * 1024 * 1024, 64 * 1024, 64 * 1024 * 1024)), 3);
-        logger.Write(wannaviewer::LogLevel::Info, "application", "WannaViewer starting");
+                    static_cast<std::uintmax_t>(config.GetInt("logging.max_bytes", 2 * 1024 * 1024,
+                                                              64 * 1024, 64 * 1024 * 1024)), 3);
+        logger.Write(wannaviewer::LogLevel::Info, "application", "WannaViewer starting with Qt Widgets UI");
 
-        wannaviewer::PlayerWindow window(std::move(paths), std::move(config), logger);
-        window.Create(instance, showCommand, backgroundTest);
+        wannaviewer::QtPlayerWindow window(std::move(paths), std::move(config), logger, backgroundTest);
+        if (backgroundTest) {
+            QRect virtualDesktop;
+            for (const auto* screen : QGuiApplication::screens()) virtualDesktop = virtualDesktop.united(screen->geometry());
+            window.move(virtualDesktop.right() + 1024, virtualDesktop.bottom() + 1024);
+        }
+        window.show();
         if (benchmark) window.EnableBenchmark(std::move(input), std::move(benchmarkMode));
         else if (!input.empty()) window.OpenInitial(std::move(input));
-        return window.Run();
+        return application.exec();
     } catch (const std::exception& error) {
-        const auto detail = std::string("WannaViewer could not start:\n\n") + error.what();
-        const auto wide = [&] {
-            const int count = MultiByteToWideChar(CP_UTF8, 0, detail.data(), static_cast<int>(detail.size()), nullptr, 0);
-            std::wstring value(static_cast<std::size_t>(count), L'\0');
-            (void)MultiByteToWideChar(CP_UTF8, 0, detail.data(), static_cast<int>(detail.size()), value.data(), count);
-            return value;
-        }();
-        if (!backgroundTest) MessageBoxW(nullptr, wide.c_str(), L"WannaViewer", MB_OK | MB_ICONERROR);
+        if (!backgroundTest) {
+            QMessageBox::critical(nullptr, QStringLiteral("WannaViewer"),
+                                  QStringLiteral("WannaViewer could not start:\n\n") + QString::fromUtf8(error.what()));
+        }
         return 1;
     }
 }

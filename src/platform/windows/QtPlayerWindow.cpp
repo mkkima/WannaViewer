@@ -1,0 +1,1650 @@
+#include "wannaviewer/platform/windows/QtPlayerWindow.hpp"
+
+#ifdef _WIN32
+
+#include "wannaviewer/core/Url.hpp"
+#include "wannaviewer/resolvers/AniBoomResolver.hpp"
+#include "wannaviewer/resolvers/AnimeGoResolver.hpp"
+#include "wannaviewer/resolvers/BrowserEmbedResolver.hpp"
+#include "wannaviewer/resolvers/CdnVideoHubResolver.hpp"
+#include "wannaviewer/resolvers/DirectMediaResolver.hpp"
+#include "wannaviewer/resolvers/GenericResolver.hpp"
+#include "wannaviewer/resolvers/YummyAnimeResolver.hpp"
+
+#include <QAbstractAnimation>
+#include <QApplication>
+#include <QBoxLayout>
+#include <QCloseEvent>
+#include <QComboBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFormLayout>
+#include <QFrame>
+#include <QGraphicsOpacityEffect>
+#include <QGridLayout>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMimeData>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPropertyAnimation>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QScreen>
+#include <QSignalBlocker>
+#include <QSlider>
+#include <QStyle>
+#include <QTimer>
+#include <QUrl>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <ranges>
+
+#include <dxgi1_6.h>
+#include <nlohmann/json.hpp>
+#include <windows.h>
+
+namespace wannaviewer {
+namespace {
+
+constexpr int kControlsHeight = 92;
+constexpr int kControlsMargin = 12;
+constexpr int kControlsHideDelayMs = 1100;
+constexpr int kUiIntervalMs = 100;
+constexpr UINT kBackgroundTestQueryMessage = WM_APP + 0x250;
+constexpr UINT kBackgroundTestActionMessage = WM_APP + 0x251;
+
+QString ToQString(std::string_view value) {
+    return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
+}
+
+std::string ToUtf8(const QString& value) {
+    const QByteArray bytes = value.toUtf8();
+    return {bytes.constData(), static_cast<std::size_t>(bytes.size())};
+}
+
+QString TimeText(double seconds) {
+    const auto total = std::max<std::int64_t>(0, static_cast<std::int64_t>(seconds));
+    const auto hours = total / 3600;
+    const auto minutes = (total / 60) % 60;
+    const auto remaining = total % 60;
+    return hours > 0 ? QStringLiteral("%1:%2:%3").arg(hours).arg(minutes, 2, 10, QLatin1Char('0'))
+                                                .arg(remaining, 2, 10, QLatin1Char('0'))
+                     : QStringLiteral("%1:%2").arg(minutes, 2, 10, QLatin1Char('0'))
+                                                .arg(remaining, 2, 10, QLatin1Char('0'));
+}
+
+QString DisplayLabel(std::string_view value, const char* fallback) {
+    return value.empty() ? QString::fromUtf8(fallback) : ToQString(value);
+}
+
+enum class Glyph {
+    Play, Pause, Back, Forward, Volume, Audio, Subtitles, Hd, Sparkle,
+    Statistics, Settings, Fullscreen
+};
+
+QIcon MakeIcon(Glyph glyph, QColor color = QColor(244, 244, 246)) {
+    QPixmap pixmap(64, 64);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(color, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    const QPointF center(32.0, 32.0);
+    switch (glyph) {
+    case Glyph::Play: {
+        QPainterPath path;
+        path.moveTo(25.0, 19.0); path.lineTo(25.0, 45.0); path.lineTo(44.0, 32.0); path.closeSubpath();
+        painter.drawPath(path);
+        break;
+    }
+    case Glyph::Pause:
+        painter.drawLine(QPointF(25.0, 20.0), QPointF(25.0, 44.0));
+        painter.drawLine(QPointF(39.0, 20.0), QPointF(39.0, 44.0));
+        break;
+    case Glyph::Back:
+    case Glyph::Forward: {
+        const bool forward = glyph == Glyph::Forward;
+        painter.drawArc(QRectF(18.0, 18.0, 28.0, 28.0), forward ? 35 * 16 : 145 * 16, 285 * 16);
+        QPainterPath arrow;
+        if (forward) { arrow.moveTo(43.0, 16.0); arrow.lineTo(48.0, 22.0); arrow.lineTo(40.0, 23.0); }
+        else { arrow.moveTo(21.0, 16.0); arrow.lineTo(16.0, 22.0); arrow.lineTo(24.0, 23.0); }
+        painter.drawPath(arrow);
+        QFont font(QStringLiteral("Segoe UI"), 9, QFont::DemiBold);
+        painter.setFont(font);
+        painter.drawText(QRectF(18.0, 21.0, 28.0, 25.0), Qt::AlignCenter, QStringLiteral("10"));
+        break;
+    }
+    case Glyph::Volume: {
+        QPainterPath speaker;
+        speaker.moveTo(17.0, 27.0); speaker.lineTo(24.0, 27.0); speaker.lineTo(32.0, 20.0);
+        speaker.lineTo(32.0, 44.0); speaker.lineTo(24.0, 37.0); speaker.lineTo(17.0, 37.0); speaker.closeSubpath();
+        painter.drawPath(speaker);
+        painter.drawArc(QRectF(27.0, 23.0, 18.0, 18.0), -55 * 16, 110 * 16);
+        painter.drawArc(QRectF(25.0, 17.0, 30.0, 30.0), -50 * 16, 100 * 16);
+        break;
+    }
+    case Glyph::Audio:
+        painter.drawLine(QPointF(34.0, 17.0), QPointF(34.0, 40.0));
+        painter.drawLine(QPointF(34.0, 17.0), QPointF(46.0, 21.0));
+        painter.drawEllipse(QRectF(22.0, 37.0, 13.0, 10.0));
+        break;
+    case Glyph::Subtitles:
+        painter.drawRoundedRect(QRectF(14.0, 18.0, 36.0, 28.0), 5.0, 5.0);
+        painter.drawLine(QPointF(20.0, 29.0), QPointF(30.0, 29.0));
+        painter.drawLine(QPointF(35.0, 29.0), QPointF(44.0, 29.0));
+        painter.drawLine(QPointF(20.0, 37.0), QPointF(27.0, 37.0));
+        painter.drawLine(QPointF(32.0, 37.0), QPointF(44.0, 37.0));
+        break;
+    case Glyph::Hd:
+        painter.drawRoundedRect(QRectF(13.0, 19.0, 38.0, 26.0), 5.0, 5.0);
+        painter.setFont(QFont(QStringLiteral("Segoe UI"), 10, QFont::Bold));
+        painter.drawText(QRectF(13.0, 18.0, 38.0, 27.0), Qt::AlignCenter, QStringLiteral("HD"));
+        break;
+    case Glyph::Sparkle: {
+        QPainterPath path;
+        path.moveTo(32.0, 13.0); path.lineTo(36.0, 28.0); path.lineTo(51.0, 32.0);
+        path.lineTo(36.0, 36.0); path.lineTo(32.0, 51.0); path.lineTo(28.0, 36.0);
+        path.lineTo(13.0, 32.0); path.lineTo(28.0, 28.0); path.closeSubpath();
+        painter.drawPath(path);
+        break;
+    }
+    case Glyph::Statistics:
+        painter.drawLine(QPointF(15.0, 47.0), QPointF(49.0, 47.0));
+        painter.drawLine(QPointF(22.0, 45.0), QPointF(22.0, 34.0));
+        painter.drawLine(QPointF(32.0, 45.0), QPointF(32.0, 27.0));
+        painter.drawLine(QPointF(42.0, 45.0), QPointF(42.0, 18.0));
+        break;
+    case Glyph::Settings:
+        painter.drawEllipse(QRectF(20.0, 20.0, 24.0, 24.0));
+        painter.drawEllipse(QRectF(28.0, 28.0, 8.0, 8.0));
+        for (int index = 0; index < 8; ++index) {
+            const double angle = 3.14159265358979323846 * static_cast<double>(index) / 4.0;
+            painter.drawLine(center + QPointF(std::cos(angle) * 15.0, std::sin(angle) * 15.0),
+                             center + QPointF(std::cos(angle) * 21.0, std::sin(angle) * 21.0));
+        }
+        break;
+    case Glyph::Fullscreen:
+        painter.drawLine(QPointF(15.0, 27.0), QPointF(15.0, 15.0)); painter.drawLine(QPointF(15.0, 15.0), QPointF(27.0, 15.0));
+        painter.drawLine(QPointF(37.0, 15.0), QPointF(49.0, 15.0)); painter.drawLine(QPointF(49.0, 15.0), QPointF(49.0, 27.0));
+        painter.drawLine(QPointF(49.0, 37.0), QPointF(49.0, 49.0)); painter.drawLine(QPointF(49.0, 49.0), QPointF(37.0, 49.0));
+        painter.drawLine(QPointF(27.0, 49.0), QPointF(15.0, 49.0)); painter.drawLine(QPointF(15.0, 49.0), QPointF(15.0, 37.0));
+        break;
+    }
+    return QIcon(pixmap);
+}
+
+class SeekSlider final : public QSlider {
+public:
+    explicit SeekSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {}
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) { QSlider::mousePressEvent(event); return; }
+        setSliderDown(true);
+        emit sliderPressed();
+        SetFromMouse(event->position().x());
+        event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!isSliderDown()) { QSlider::mouseMoveEvent(event); return; }
+        SetFromMouse(event->position().x());
+        event->accept();
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || !isSliderDown()) { QSlider::mouseReleaseEvent(event); return; }
+        SetFromMouse(event->position().x());
+        setSliderDown(false);
+        emit sliderReleased();
+        event->accept();
+    }
+
+private:
+    void SetFromMouse(qreal x) {
+        const int sliderValue = QStyle::sliderValueFromPosition(
+            minimum(), maximum(), static_cast<int>(std::lround(std::clamp(x, 0.0, static_cast<double>(width())))),
+            std::max(1, width()));
+        setValue(sliderValue);
+        emit sliderMoved(sliderValue);
+    }
+};
+
+QPushButton* MakeIconButton(QWidget* parent, Glyph glyph, const QString& tooltip) {
+    auto* button = new QPushButton(parent);
+    button->setProperty("chrome", true);
+    button->setIcon(MakeIcon(glyph));
+    button->setIconSize(QSize(22, 22));
+    button->setFixedSize(38, 38);
+    button->setToolTip(tooltip);
+    button->setFocusPolicy(Qt::StrongFocus);
+    return button;
+}
+
+} // namespace
+
+QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger, bool backgroundTest)
+    : paths_(std::move(paths)), config_(std::move(config)), logger_(logger),
+      shaders_(paths_.shaders, paths_.presets / "shaders.json"),
+      ytDlp_(paths_.tools / "yt-dlp.exe"), resolvers_(&ytDlp_), engine_(paths_, config_, logger_),
+      backgroundTest_(backgroundTest) {
+    shaders_.Reload();
+    resolvers_.Add(std::make_unique<DirectMediaResolver>());
+    resolvers_.Add(std::make_unique<AnimeGoResolver>());
+    resolvers_.Add(std::make_unique<BrowserEmbedResolver>(paths_.cache / "webview2"));
+    resolvers_.Add(std::make_unique<CdnVideoHubResolver>());
+    resolvers_.Add(std::make_unique<AniBoomResolver>());
+    resolvers_.Add(std::make_unique<YummyAnimeResolver>());
+    resolvers_.Add(std::make_unique<GenericResolver>());
+
+    setObjectName(QStringLiteral("playerRoot"));
+    setWindowTitle(QStringLiteral("WannaViewer"));
+    setMinimumSize(780, 500);
+    resize(1280, 760);
+    setAcceptDrops(true);
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+    if (backgroundTest_) {
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setWindowFlag(Qt::WindowDoesNotAcceptFocus, true);
+    }
+    BuildUi();
+    ConnectUi();
+    ApplyTheme();
+    qApp->installEventFilter(this);
+    LogHardwareInformation();
+    StartEngineInitialization();
+}
+
+QtPlayerWindow::~QtPlayerWindow() {
+    closing_.store(true);
+    qApp->removeEventFilter(this);
+    if (resolverThread_.joinable()) { resolverThread_.request_stop(); resolverThread_.join(); }
+    if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
+    engine_.Shutdown();
+}
+
+void QtPlayerWindow::BuildUi() {
+    videoSurface_ = new QWidget(this);
+    videoSurface_->setObjectName(QStringLiteral("videoSurface"));
+    videoSurface_->setAttribute(Qt::WA_NativeWindow, true);
+    videoSurface_->setMouseTracking(true);
+    (void)videoSurface_->winId();
+
+    controls_ = new QFrame(this);
+    controls_->setObjectName(QStringLiteral("controls"));
+    controls_->setAttribute(Qt::WA_NativeWindow, true);
+    controls_->setMouseTracking(true);
+    auto* controlsLayout = new QVBoxLayout(controls_);
+    controlsLayout->setContentsMargins(18, 10, 18, 10);
+    controlsLayout->setSpacing(5);
+    timeline_ = new SeekSlider(controls_);
+    timeline_->setObjectName(QStringLiteral("timeline"));
+    timeline_->setRange(0, 10000);
+    timeline_->setFixedHeight(22);
+    controlsLayout->addWidget(timeline_);
+
+    auto* row = new QHBoxLayout();
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(5);
+    playButton_ = MakeIconButton(controls_, Glyph::Play, QStringLiteral("Play / Pause"));
+    rewindButton_ = MakeIconButton(controls_, Glyph::Back, QStringLiteral("Back 10 seconds"));
+    forwardButton_ = MakeIconButton(controls_, Glyph::Forward, QStringLiteral("Forward 10 seconds"));
+    muteButton_ = MakeIconButton(controls_, Glyph::Volume, QStringLiteral("Mute"));
+    volume_ = new QSlider(Qt::Horizontal, controls_);
+    volume_->setObjectName(QStringLiteral("volume"));
+    volume_->setRange(0, 100);
+    volume_->setValue(80);
+    volume_->setFixedWidth(86);
+    timeLabel_ = new QLabel(QStringLiteral("00:00  /  00:00"), controls_);
+    timeLabel_->setObjectName(QStringLiteral("timeLabel"));
+    timeLabel_->setMinimumWidth(116);
+    audioButton_ = MakeIconButton(controls_, Glyph::Audio, QStringLiteral("Audio track"));
+    subtitleButton_ = MakeIconButton(controls_, Glyph::Subtitles, QStringLiteral("Subtitles"));
+    videoButton_ = MakeIconButton(controls_, Glyph::Hd, QStringLiteral("Video track"));
+    shaderButton_ = MakeIconButton(controls_, Glyph::Sparkle, QStringLiteral("Shaders"));
+    statsButton_ = MakeIconButton(controls_, Glyph::Statistics, QStringLiteral("Statistics"));
+    settingsButton_ = MakeIconButton(controls_, Glyph::Settings, QStringLiteral("Settings"));
+    fullscreenButton_ = MakeIconButton(controls_, Glyph::Fullscreen, QStringLiteral("Full screen"));
+    const std::array<QWidget*, 13> playbackControls{
+        playButton_, rewindButton_, forwardButton_, muteButton_, volume_, audioButton_, subtitleButton_,
+        videoButton_, shaderButton_, statsButton_, settingsButton_, fullscreenButton_, timeline_};
+    for (QWidget* widget : playbackControls) widget->setEnabled(false);
+    row->addWidget(playButton_); row->addWidget(rewindButton_); row->addWidget(forwardButton_);
+    row->addWidget(muteButton_); row->addWidget(volume_); row->addSpacing(8); row->addWidget(timeLabel_);
+    row->addStretch(1);
+    row->addWidget(audioButton_); row->addWidget(subtitleButton_); row->addWidget(videoButton_);
+    row->addWidget(shaderButton_); row->addWidget(statsButton_); row->addWidget(settingsButton_);
+    row->addWidget(fullscreenButton_);
+    controlsLayout->addLayout(row);
+
+    controlsOpacity_ = new QGraphicsOpacityEffect(controls_);
+    controlsOpacity_->setOpacity(1.0);
+    controls_->setGraphicsEffect(controlsOpacity_);
+    controlsAnimation_ = new QPropertyAnimation(controlsOpacity_, "opacity", this);
+    controlsAnimation_->setEasingCurve(QEasingCurve::OutCubic);
+
+    emptyState_ = new QFrame(this);
+    emptyState_->setObjectName(QStringLiteral("emptyState"));
+    emptyState_->setAttribute(Qt::WA_NativeWindow, true);
+    auto* emptyLayout = new QVBoxLayout(emptyState_);
+    emptyLayout->setContentsMargins(34, 28, 34, 28);
+    emptyLayout->setSpacing(9);
+    emptyPlayIcon_ = MakeIconButton(emptyState_, Glyph::Play, QStringLiteral("Open a video"));
+    emptyPlayIcon_->setObjectName(QStringLiteral("emptyPlay"));
+    emptyPlayIcon_->setIconSize(QSize(32, 32));
+    emptyPlayIcon_->setFixedSize(58, 58);
+    auto* emptyTitle = new QLabel(QStringLiteral("Open a video"), emptyState_);
+    emptyTitle->setObjectName(QStringLiteral("emptyTitle"));
+    emptyTitle->setAlignment(Qt::AlignCenter);
+    auto* emptyHint = new QLabel(QStringLiteral("Drop a media file here, or open a local file or link"), emptyState_);
+    emptyHint->setObjectName(QStringLiteral("mutedText"));
+    emptyHint->setAlignment(Qt::AlignCenter);
+    openFileButton_ = new QPushButton(QStringLiteral("Open file"), emptyState_);
+    openFileButton_->setObjectName(QStringLiteral("primaryButton"));
+    openUrlButton_ = new QPushButton(QStringLiteral("Open link"), emptyState_);
+    auto* emptyButtons = new QHBoxLayout();
+    emptyButtons->setSpacing(10);
+    emptyButtons->addWidget(openFileButton_); emptyButtons->addWidget(openUrlButton_);
+    emptyLayout->addWidget(emptyPlayIcon_, 0, Qt::AlignHCenter);
+    emptyLayout->addWidget(emptyTitle); emptyLayout->addWidget(emptyHint); emptyLayout->addSpacing(8);
+    emptyLayout->addLayout(emptyButtons);
+
+    statistics_ = new QLabel(this);
+    statistics_->setObjectName(QStringLiteral("statistics"));
+    statistics_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    statistics_->setWordWrap(false);
+    statistics_->hide();
+    statistics_->setAttribute(Qt::WA_NativeWindow, true);
+
+    overlay_ = new QFrame(this);
+    overlay_->setObjectName(QStringLiteral("overlayPanel"));
+    overlay_->setAttribute(Qt::WA_NativeWindow, true);
+    auto* overlayLayout = new QVBoxLayout(overlay_);
+    overlayLayout->setContentsMargins(28, 26, 28, 24);
+    overlayLayout->setSpacing(11);
+    overlayTitle_ = new QLabel(overlay_);
+    overlayTitle_->setObjectName(QStringLiteral("panelTitle"));
+    overlayBody_ = new QLabel(overlay_);
+    overlayBody_->setObjectName(QStringLiteral("mutedText"));
+    overlayBody_->setWordWrap(true);
+    overlayEdit_ = new QLineEdit(overlay_);
+    overlayEdit_->setPlaceholderText(QStringLiteral("https://"));
+    overlayList_ = new QListWidget(overlay_);
+    overlayList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    overlayPrimary_ = new QPushButton(QStringLiteral("Apply"), overlay_);
+    overlayPrimary_->setObjectName(QStringLiteral("primaryButton"));
+    overlaySecondary_ = new QPushButton(QStringLiteral("Cancel"), overlay_);
+    auto* overlayButtons = new QHBoxLayout();
+    overlayButtons->addStretch(1); overlayButtons->addWidget(overlaySecondary_); overlayButtons->addWidget(overlayPrimary_);
+    overlayLayout->addWidget(overlayTitle_); overlayLayout->addWidget(overlayBody_);
+    overlayLayout->addWidget(overlayEdit_); overlayLayout->addWidget(overlayList_, 1);
+    overlayLayout->addLayout(overlayButtons);
+    overlay_->hide();
+
+    sourcePanel_ = new QFrame(this);
+    sourcePanel_->setObjectName(QStringLiteral("sourcePanel"));
+    sourcePanel_->setAttribute(Qt::WA_NativeWindow, true);
+    auto* sourceLayout = new QVBoxLayout(sourcePanel_);
+    sourceLayout->setContentsMargins(30, 26, 30, 24);
+    sourceLayout->setSpacing(13);
+    sourceTitle_ = new QLabel(QStringLiteral("Choose an episode"), sourcePanel_);
+    sourceTitle_->setObjectName(QStringLiteral("panelTitle"));
+    auto* sourceForm = new QFormLayout();
+    sourceForm->setHorizontalSpacing(18); sourceForm->setVerticalSpacing(12);
+    sourceSeason_ = new QComboBox(sourcePanel_); sourceVoice_ = new QComboBox(sourcePanel_);
+    sourceEpisode_ = new QComboBox(sourcePanel_); sourceStream_ = new QComboBox(sourcePanel_);
+    sourceForm->addRow(QStringLiteral("Season"), sourceSeason_);
+    sourceForm->addRow(QStringLiteral("Voice"), sourceVoice_);
+    sourceForm->addRow(QStringLiteral("Episode"), sourceEpisode_);
+    sourceForm->addRow(QStringLiteral("Source"), sourceStream_);
+    sourceStatus_ = new QLabel(sourcePanel_);
+    sourceStatus_->setObjectName(QStringLiteral("mutedText"));
+    sourceStatus_->setWordWrap(true);
+    sourceOpen_ = new QPushButton(QStringLiteral("Open"), sourcePanel_);
+    sourceOpen_->setObjectName(QStringLiteral("primaryButton"));
+    sourceCancel_ = new QPushButton(QStringLiteral("Cancel"), sourcePanel_);
+    auto* sourceButtons = new QHBoxLayout();
+    sourceButtons->addStretch(1); sourceButtons->addWidget(sourceCancel_); sourceButtons->addWidget(sourceOpen_);
+    sourceLayout->addWidget(sourceTitle_); sourceLayout->addLayout(sourceForm); sourceLayout->addWidget(sourceStatus_);
+    sourceLayout->addStretch(1); sourceLayout->addLayout(sourceButtons);
+    sourcePanel_->hide();
+
+    hideTimer_ = new QTimer(this);
+    hideTimer_->setSingleShot(true);
+    hideTimer_->setInterval(kControlsHideDelayMs);
+    uiTimer_ = new QTimer(this);
+    uiTimer_->setInterval(kUiIntervalMs);
+    LayoutOverlays();
+    UpdateVisibility();
+}
+
+void QtPlayerWindow::ConnectUi() {
+    connect(openFileButton_, &QPushButton::clicked, this, [this] { OpenFileDialog(); });
+    connect(emptyPlayIcon_, &QPushButton::clicked, this, [this] { OpenFileDialog(); });
+    connect(openUrlButton_, &QPushButton::clicked, this, [this] { ShowUrlOverlay(); });
+    connect(playButton_, &QPushButton::clicked, this, [this] { engine_.TogglePause(); RecordInteraction(); });
+    connect(rewindButton_, &QPushButton::clicked, this, [this] { engine_.SeekRelative(-10.0); RecordInteraction(); });
+    connect(forwardButton_, &QPushButton::clicked, this, [this] { engine_.SeekRelative(10.0); RecordInteraction(); });
+    connect(muteButton_, &QPushButton::clicked, this, [this] { engine_.ToggleMute(); RecordInteraction(); });
+    connect(volume_, &QSlider::valueChanged, this, [this](int value) {
+        if (engineReady_ && mediaLoaded_) engine_.SetVolume(static_cast<double>(value));
+        RecordInteraction();
+    });
+    connect(timeline_, &QSlider::sliderPressed, this, [this] { timelineDragging_ = true; RecordInteraction(); });
+    connect(timeline_, &QSlider::sliderMoved, this, [this](int) { SeekFromSlider(false); });
+    connect(timeline_, &QSlider::sliderReleased, this, [this] { SeekFromSlider(true); });
+    connect(audioButton_, &QPushButton::clicked, this, [this] { ShowAudioMenu(); });
+    connect(subtitleButton_, &QPushButton::clicked, this, [this] { ShowSubtitleMenu(); });
+    connect(videoButton_, &QPushButton::clicked, this, [this] { ShowVideoMenu(); });
+    connect(shaderButton_, &QPushButton::clicked, this, [this] { ShowShaderMenu(); });
+    connect(statsButton_, &QPushButton::clicked, this, [this] { ToggleStatistics(); });
+    connect(settingsButton_, &QPushButton::clicked, this, [this] { ShowSettingsMenu(); });
+    connect(fullscreenButton_, &QPushButton::clicked, this, [this] { ToggleFullscreen(); });
+    connect(overlayPrimary_, &QPushButton::clicked, this, [this] { ApplyOverlaySelection(); });
+    connect(overlaySecondary_, &QPushButton::clicked, this, [this] { HideOverlay(); });
+    connect(overlayEdit_, &QLineEdit::returnPressed, this, [this] { ApplyOverlaySelection(); });
+    connect(overlayList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { ApplyOverlaySelection(); });
+    connect(sourceCancel_, &QPushButton::clicked, this, [this] { HideSourceSelector(); });
+    connect(sourceOpen_, &QPushButton::clicked, this, [this] { OpenSelectedSource(); });
+    connect(sourceSeason_, &QComboBox::currentIndexChanged, this, [this](int value) {
+        if (!sourceSelection_) return;
+        sourceSeasonIndex_ = value; sourceVoiceIndex_ = sourceEpisodeIndex_ = sourceStreamIndex_ = -1;
+        PopulateSourceVoices(); PopulateSourceEpisodes(); PopulateSourceStreams();
+    });
+    connect(sourceVoice_, &QComboBox::currentIndexChanged, this, [this](int value) {
+        if (!sourceSelection_) return;
+        sourceVoiceIndex_ = value; sourceEpisodeIndex_ = sourceStreamIndex_ = -1;
+        PopulateSourceEpisodes(); PopulateSourceStreams();
+    });
+    connect(sourceEpisode_, &QComboBox::currentIndexChanged, this, [this](int value) {
+        if (!sourceSelection_) return;
+        sourceEpisodeIndex_ = value; sourceStreamIndex_ = -1; PopulateSourceStreams();
+    });
+    connect(sourceStream_, &QComboBox::currentIndexChanged, this, [this](int value) {
+        if (!sourceSelection_) return;
+        sourceStreamIndex_ = value;
+        UpdateSourceSelectionUi();
+    });
+    connect(hideTimer_, &QTimer::timeout, this, [this] {
+        if (CursorOverControls() || overlayMode_ != OverlayMode::None || sourceSelection_) {
+            hideTimer_->start(250);
+            return;
+        }
+        ShowControls(false);
+    });
+    connect(uiTimer_, &QTimer::timeout, this, [this] { UpdateUi(); });
+    connect(controlsAnimation_, &QPropertyAnimation::finished, this, [this] {
+        if (!controlsVisible_) controls_->hide();
+    });
+}
+
+void QtPlayerWindow::ApplyTheme() {
+    setStyleSheet(QStringLiteral(R"(
+        QWidget#playerRoot, QWidget#videoSurface { background: #000000; color: #f4f4f6; }
+        QWidget { font-family: "Segoe UI Variable Text", "Segoe UI"; font-size: 14px; }
+        QFrame#controls { background: rgba(5, 5, 6, 246); border: 1px solid #1c1c20; border-radius: 18px; }
+        QPushButton { min-height: 34px; padding: 0 16px; color: #f4f4f6; background: #121216;
+                      border: 1px solid #34343a; border-radius: 17px; }
+        QPushButton:hover { background: #24242a; border-color: #55555d; }
+        QPushButton:pressed { background: #303037; }
+        QPushButton:disabled { color: #66666d; background: transparent; border-color: transparent; }
+        QPushButton[chrome="true"] { padding: 0; background: transparent; border: none; border-radius: 19px; }
+        QPushButton[chrome="true"]:hover { background: #24242a; }
+        QPushButton[chrome="true"]:pressed { background: #34343b; }
+        QPushButton#primaryButton { background: #f4f4f6; color: #070708; border-color: #f4f4f6; font-weight: 600; }
+        QPushButton#primaryButton:hover { background: #ffffff; }
+        QPushButton#emptyPlay { padding: 0; border-radius: 29px; background: #17171b; border-color: #424248; }
+        QLabel#emptyTitle, QLabel#panelTitle { font-size: 24px; font-weight: 600; }
+        QLabel#mutedText { color: #a2a2aa; }
+        QLabel#timeLabel { color: #ededf0; font-variant-numeric: tabular-nums; }
+        QFrame#emptyState, QFrame#overlayPanel, QFrame#sourcePanel {
+            background: #0b0b0e; border: 1px solid #36363d; border-radius: 22px;
+        }
+        QLabel#statistics { background: rgba(7, 7, 9, 230); border: 1px solid #34343a;
+                            border-radius: 14px; padding: 14px; color: #e8e8ec;
+                            font-family: "Cascadia Mono", "Consolas"; font-size: 12px; }
+        QLineEdit, QComboBox, QListWidget { color: #f2f2f4; background: #121216; border: 1px solid #383840;
+                                           border-radius: 12px; padding: 8px 11px; selection-background-color: #33333a; }
+        QLineEdit:focus, QComboBox:focus, QListWidget:focus { border-color: #73737d; }
+        QComboBox { min-height: 28px; }
+        QComboBox::drop-down { border: none; width: 28px; }
+        QComboBox QAbstractItemView { background: #101014; border: 1px solid #3b3b42;
+                                     selection-background-color: #2b2b31; outline: none; padding: 6px; }
+        QListWidget { outline: none; padding: 7px; }
+        QListWidget::item { min-height: 34px; border-radius: 10px; padding: 2px 10px; }
+        QListWidget::item:hover { background: #202025; }
+        QListWidget::item:selected { background: #303037; }
+        QSlider::groove:horizontal { height: 4px; background: #303036; border-radius: 2px; }
+        QSlider::sub-page:horizontal { background: #f1f1f3; border-radius: 2px; }
+        QSlider::handle:horizontal { width: 12px; margin: -4px 0; background: #ffffff;
+                                     border: none; border-radius: 6px; }
+        QSlider::handle:horizontal:hover { width: 16px; margin: -6px 0; border-radius: 8px; }
+        QSlider:disabled::sub-page:horizontal, QSlider:disabled::handle:horizontal { background: #66666c; }
+        QToolTip { color: #f4f4f6; background: #151519; border: 1px solid #3b3b42; border-radius: 8px; padding: 6px; }
+    )"));
+}
+
+void QtPlayerWindow::LayoutOverlays() {
+    videoSurface_->setGeometry(rect());
+    const int controlsWidth = std::max(0, width() - kControlsMargin * 2);
+    controls_->setGeometry(kControlsMargin, std::max(kControlsMargin, height() - kControlsHeight - kControlsMargin),
+                           controlsWidth, kControlsHeight);
+    const QSize emptySize(std::min(520, std::max(320, width() - 48)), 252);
+    emptyState_->setGeometry((width() - emptySize.width()) / 2, (height() - emptySize.height()) / 2,
+                             emptySize.width(), emptySize.height());
+    const int preferredOverlayHeight = overlayMode_ == OverlayMode::Url ? 270 :
+                                       overlayMode_ == OverlayMode::Message ? 260 : 540;
+    const int preferredOverlayWidth = overlayMode_ == OverlayMode::Choice ? 720 : 660;
+    const QSize overlaySize(std::min(preferredOverlayWidth, std::max(420, width() - 64)),
+                            std::min(preferredOverlayHeight, std::max(240, height() - 80)));
+    overlay_->setGeometry((width() - overlaySize.width()) / 2, (height() - overlaySize.height()) / 2,
+                          overlaySize.width(), overlaySize.height());
+    const QSize sourceSize(std::min(760, std::max(440, width() - 64)),
+                           std::min(430, std::max(360, height() - 80)));
+    sourcePanel_->setGeometry((width() - sourceSize.width()) / 2, (height() - sourceSize.height()) / 2,
+                              sourceSize.width(), sourceSize.height());
+    statistics_->setGeometry(18, 18, std::min(560, std::max(320, width() - 36)),
+                             std::min(350, std::max(220, height() - 36)));
+    videoSurface_->lower();
+    if (emptyState_->isVisible()) emptyState_->raise();
+    if (controls_->isVisible()) controls_->raise();
+    if (statistics_->isVisible()) statistics_->raise();
+    if (sourcePanel_->isVisible()) sourcePanel_->raise();
+    if (overlay_->isVisible()) overlay_->raise();
+}
+
+void QtPlayerWindow::UpdateVisibility() {
+    emptyState_->setVisible(!mediaLoaded_ && !mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    controls_->setVisible(mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    sourcePanel_->setVisible(sourceSelection_.has_value());
+    overlay_->setVisible(overlayMode_ != OverlayMode::None);
+    statistics_->setVisible(statisticsVisible_ && mediaLoaded_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    LayoutOverlays();
+}
+
+bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+    if (!backgroundTest_ || eventType != QByteArrayLiteral("windows_generic_MSG"))
+        return QWidget::nativeEvent(eventType, message, result);
+    const auto* nativeMessage = static_cast<const MSG*>(message);
+    if (nativeMessage->message == kBackgroundTestQueryMessage) {
+        bool value = false;
+        switch (nativeMessage->wParam) {
+        case 1:
+            value = emptyState_->isVisible() && openFileButton_->isVisible() && openUrlButton_->isVisible();
+            break;
+        case 2:
+            value = overlayMode_ == OverlayMode::Url && overlay_->isVisible() && overlayEdit_->isVisible() &&
+                    overlayPrimary_->isVisible() && overlaySecondary_->isVisible();
+            break;
+        case 3:
+            value = sourceSelection_.has_value() && sourcePanel_->isVisible();
+            break;
+        case 4:
+            value = mediaLoaded_;
+            break;
+        case 5:
+            value = playbackStarted_;
+            break;
+        case 6:
+            value = controlsVisible_ && controls_->isVisible();
+            break;
+        case 7:
+            *result = timeline_->value();
+            return true;
+        case 8:
+            *result = static_cast<qintptr>(std::lround(std::max(0.0, engine_.Position()) * 100.0));
+            return true;
+        case 9: {
+            int providers = 0;
+            if (sourceSelection_) {
+                for (const auto& season : sourceSelection_->entry.seasons) {
+                    for (const auto& voice : season.voiceTracks) {
+                        for (const auto& episode : voice.episodes) {
+                            for (const auto& stream : episode.streams) {
+                                const QString identity = (ToQString(stream.quality) + QLatin1Char(' ') +
+                                                          ToQString(stream.url)).toLower();
+                                if (identity.contains(QStringLiteral("cvh")) ||
+                                    identity.contains(QStringLiteral("cdnvideohub"))) providers |= 1;
+                                if (identity.contains(QStringLiteral("kodik"))) providers |= 2;
+                                if (identity.contains(QStringLiteral("alloha"))) providers |= 4;
+                                if (identity.contains(QStringLiteral("aniboom"))) providers |= 8;
+                            }
+                        }
+                    }
+                }
+            }
+            *result = providers;
+            return true;
+        }
+        default:
+            break;
+        }
+        *result = value ? 1 : 0;
+        return true;
+    }
+    if (nativeMessage->message == kBackgroundTestActionMessage) {
+        switch (nativeMessage->wParam) {
+        case 1: ShowUrlOverlay(); break;
+        case 2: HideOverlay(); break;
+        case 3: ShowControls(true, false); break;
+        case 4: ShowControls(false, false); break;
+        case 5: close(); break;
+        case 6:
+            timeline_->setValue(5000);
+            SeekFromSlider(true);
+            break;
+        case 7: {
+            if (!sourceSelection_) { *result = 0; return true; }
+            std::optional<StreamVariant> cvh;
+            for (const auto& season : sourceSelection_->entry.seasons) {
+                for (const auto& voice : season.voiceTracks) {
+                    for (const auto& episode : voice.episodes) {
+                        for (const auto& stream : episode.streams) {
+                            const QString identity = (ToQString(stream.quality) + QLatin1Char(' ') +
+                                                      ToQString(stream.url)).toLower();
+                            if (!stream.protectedStream &&
+                                (identity.contains(QStringLiteral("cvh")) ||
+                                 identity.contains(QStringLiteral("cdnvideohub")))) {
+                                cvh = stream;
+                                break;
+                            }
+                        }
+                        if (cvh) break;
+                    }
+                    if (cvh) break;
+                }
+                if (cvh) break;
+            }
+            if (!cvh) { *result = 0; return true; }
+            HideSourceSelector();
+            OpenVariant(*cvh);
+            break;
+        }
+        case 8:
+            if (!SelectedSource()) { *result = 0; return true; }
+            OpenSelectedSource();
+            break;
+        default: *result = 0; return true;
+        }
+        *result = 1;
+        return true;
+    }
+    return QWidget::nativeEvent(eventType, message, result);
+}
+
+bool QtPlayerWindow::eventFilter(QObject* watched, QEvent* event) {
+    Q_UNUSED(watched);
+    switch (event->type()) {
+    case QEvent::MouseMove:
+    case QEvent::MouseButtonPress:
+    case QEvent::Wheel:
+    case QEvent::KeyPress:
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+        RecordInteraction();
+        break;
+    default:
+        break;
+    }
+    return false;
+}
+
+void QtPlayerWindow::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    LayoutOverlays();
+}
+
+void QtPlayerWindow::closeEvent(QCloseEvent* event) {
+    closing_.store(true);
+    if (resolverThread_.joinable()) resolverThread_.request_stop();
+    if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
+    engine_.Shutdown();
+    QWidget::closeEvent(event);
+}
+
+void QtPlayerWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (event->mimeData()->hasUrls()) event->acceptProposedAction();
+}
+
+void QtPlayerWindow::dropEvent(QDropEvent* event) {
+    const auto urls = event->mimeData()->urls();
+    if (urls.isEmpty()) return;
+    const QUrl url = urls.front();
+    if (url.isLocalFile()) {
+        const QFileInfo info(url.toLocalFile());
+        const QString extension = info.suffix().toLower();
+        if (mediaLoaded_ && (extension == QStringLiteral("srt") || extension == QStringLiteral("ass") ||
+                             extension == QStringLiteral("ssa") || extension == QStringLiteral("vtt") ||
+                             extension == QStringLiteral("sup"))) {
+            engine_.AddSubtitle(ToUtf8(info.absoluteFilePath()));
+        } else {
+            OpenMedia(ToUtf8(info.absoluteFilePath()));
+        }
+    } else {
+        ResolveUrl(ToUtf8(url.toString()));
+    }
+    event->acceptProposedAction();
+}
+
+void QtPlayerWindow::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && overlayMode_ == OverlayMode::None && !sourceSelection_) {
+        ToggleFullscreen();
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
+}
+
+void QtPlayerWindow::keyPressEvent(QKeyEvent* event) {
+    const bool control = event->modifiers().testFlag(Qt::ControlModifier);
+    const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+    if (event->key() == Qt::Key_Escape && overlayMode_ != OverlayMode::None) HideOverlay();
+    else if (event->key() == Qt::Key_Escape && sourceSelection_) HideSourceSelector();
+    else if (event->key() == Qt::Key_Escape && fullscreen_) ToggleFullscreen();
+    else if (control && event->key() >= Qt::Key_0 && event->key() <= Qt::Key_9)
+        ApplyShaderHotkey(event->key() - Qt::Key_0);
+    else if (control && event->key() == Qt::Key_O) OpenFileDialog();
+    else if (control && event->key() == Qt::Key_U) ShowUrlOverlay();
+    else if (event->key() == Qt::Key_Space) engine_.TogglePause();
+    else if (event->key() == Qt::Key_Left) engine_.SeekRelative(shift ? -30.0 : -5.0);
+    else if (event->key() == Qt::Key_Right) engine_.SeekRelative(shift ? 30.0 : 5.0);
+    else if (event->key() == Qt::Key_Period) engine_.FrameStep();
+    else if (event->key() == Qt::Key_PageUp) engine_.ChangeChapter(-1);
+    else if (event->key() == Qt::Key_PageDown) engine_.ChangeChapter(1);
+    else if (event->key() == Qt::Key_F) ToggleFullscreen();
+    else if (event->key() == Qt::Key_M) engine_.ToggleMute();
+    else if (event->key() == Qt::Key_S) engine_.CycleSubtitles();
+    else if (event->key() == Qt::Key_A) engine_.CycleAudio();
+    else if (event->key() == Qt::Key_I || event->key() == Qt::Key_F10) ToggleStatistics();
+    else { QWidget::keyPressEvent(event); return; }
+    event->accept();
+    RecordInteraction();
+}
+
+void QtPlayerWindow::StartEngineInitialization() {
+    if (engineReady_ || engineInitializationThread_.joinable()) return;
+    {
+        std::scoped_lock lock(engineInitializationMutex_);
+        engineInitializationError_.reset();
+    }
+    engineInitializationThread_ = std::jthread([this] {
+        try {
+            engine_.Initialize(static_cast<std::uintptr_t>(videoSurface_->winId()), [this](PlaybackEvent event) {
+                if (closing_.load()) return;
+                QMetaObject::invokeMethod(this, [this, event = std::move(event)]() mutable {
+                    if (!closing_.load()) HandlePlaybackEvent(std::move(event));
+                }, Qt::QueuedConnection);
+            });
+        } catch (const std::exception& error) {
+            std::scoped_lock lock(engineInitializationMutex_);
+            engineInitializationError_ = error.what();
+        } catch (...) {
+            std::scoped_lock lock(engineInitializationMutex_);
+            engineInitializationError_ = "Unknown libmpv initialization failure";
+        }
+        if (!closing_.load()) {
+            QMetaObject::invokeMethod(this, [this] { HandleEngineInitialized(); }, Qt::QueuedConnection);
+        }
+    });
+}
+
+void QtPlayerWindow::HandleEngineInitialized() {
+    if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
+    if (closing_.load()) return;
+    std::optional<std::string> error;
+    {
+        std::scoped_lock lock(engineInitializationMutex_);
+        error = std::move(engineInitializationError_);
+        engineInitializationError_.reset();
+    }
+    if (error) {
+        logger_.Write(LogLevel::Error, "playback", "libmpv initialization failed: " + *error);
+        const bool requestedPlayback = pendingMedia_.has_value();
+        pendingMedia_.reset();
+        mediaOpening_ = false;
+        setWindowTitle(QStringLiteral("WannaViewer"));
+        UpdateVisibility();
+        if (requestedPlayback) ShowError(QStringLiteral("Playback"), *error);
+        return;
+    }
+    engineReady_ = true;
+    if (!pendingMedia_) return;
+    auto media = std::move(*pendingMedia_);
+    pendingMedia_.reset();
+    try {
+        playbackLoadStarted_ = std::chrono::steady_clock::now();
+        engine_.Open(media.value, media.headers, media.externalAudioUrl);
+    } catch (const std::exception& openError) {
+        mediaOpening_ = false;
+        setWindowTitle(QStringLiteral("WannaViewer"));
+        UpdateVisibility();
+        ShowError(QStringLiteral("Playback"), openError.what());
+    }
+}
+
+void QtPlayerWindow::OpenInitial(std::string value) {
+    QTimer::singleShot(0, this, [this, value = std::move(value)]() mutable { ResolveUrl(std::move(value)); });
+}
+
+void QtPlayerWindow::EnableBenchmark(std::string value, std::string mode) {
+    benchmarkMode_ = true;
+    benchmarkInput_ = value;
+    benchmarkProfile_ = std::move(mode);
+    setWindowTitle(QStringLiteral("WannaViewer — benchmark"));
+    OpenInitial(std::move(value));
+}
+
+void QtPlayerWindow::OpenMedia(std::string value,
+                               std::vector<std::pair<std::string, std::string>> headers,
+                               std::string externalAudioUrl) {
+    if (sourceSelection_) HideSourceSelector();
+    if (overlayMode_ != OverlayMode::None) HideOverlay();
+    mediaOpening_ = true;
+    playbackStarted_ = false;
+    startupTimeoutReported_ = false;
+    playbackLoadStarted_ = std::chrono::steady_clock::now();
+    setWindowTitle(engineReady_ ? QStringLiteral("WannaViewer — opening…")
+                                : QStringLiteral("WannaViewer — preparing player…"));
+    UpdateVisibility();
+    if (!uiTimer_->isActive()) uiTimer_->start();
+    if (!engineReady_) {
+        pendingMedia_ = PendingMedia{std::move(value), std::move(headers), std::move(externalAudioUrl)};
+        StartEngineInitialization();
+        return;
+    }
+    try {
+        engine_.Open(value, headers, externalAudioUrl);
+    } catch (...) {
+        mediaOpening_ = false;
+        setWindowTitle(QStringLiteral("WannaViewer"));
+        UpdateVisibility();
+        throw;
+    }
+}
+
+void QtPlayerWindow::OpenFileDialog() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Open media"), QString(),
+        QStringLiteral("Media files (*.mkv *.mp4 *.m4v *.mov *.webm *.avi *.ts *.m2ts *.mp3 *.flac *.opus *.m4a);;All files (*.*)"));
+    if (!path.isEmpty()) OpenMedia(ToUtf8(QFileInfo(path).absoluteFilePath()));
+}
+
+void QtPlayerWindow::ShowUrlOverlay() {
+    if (sourceSelection_) HideSourceSelector();
+    overlayMode_ = OverlayMode::Url;
+    overlayAction_ = OverlayAction::None;
+    overlayChoices_.clear();
+    overlayTitle_->setText(QStringLiteral("Open a link"));
+    overlayBody_->setText(QStringLiteral("Paste a direct media URL or a supported page address"));
+    overlayPrimary_->setText(QStringLiteral("Open"));
+    overlaySecondary_->setText(QStringLiteral("Cancel"));
+    overlayEdit_->setText(QStringLiteral("https://"));
+    overlayEdit_->show();
+    overlayList_->hide();
+    overlaySecondary_->show();
+    UpdateVisibility();
+    overlayEdit_->setFocus();
+    overlayEdit_->selectAll();
+}
+
+void QtPlayerWindow::ResolveUrl(std::string value, HeaderMap inheritedHeaders) {
+    const auto parsed = Url::Parse(value);
+    if (!parsed) {
+        if (std::filesystem::exists(std::filesystem::path(value))) OpenMedia(std::move(value));
+        else ShowError(QStringLiteral("Open"), "The path does not exist or the URL scheme is not allowed");
+        return;
+    }
+    if (sourceSelection_) HideSourceSelector();
+    if (overlayMode_ != OverlayMode::None) HideOverlay();
+    if (inheritedHeaders.empty()) {
+        browserRetryUrl_.clear();
+        browserRetryHeaders_.clear();
+        browserRetriesRemaining_ = 0;
+    }
+    if (parsed->IsDirectMedia()) {
+        std::vector<std::pair<std::string, std::string>> headers(inheritedHeaders.begin(), inheritedHeaders.end());
+        OpenMedia(parsed->Value(), std::move(headers));
+        return;
+    }
+    bool expected = false;
+    if (!resolving_.compare_exchange_strong(expected, true)) {
+        ShowError(QStringLiteral("URL resolver"), "Another URL is already being resolved");
+        return;
+    }
+    setWindowTitle(QStringLiteral("WannaViewer — resolving URL…"));
+    if (resolverThread_.joinable()) resolverThread_.join();
+    resolverThread_ = std::jthread([this, url = *parsed, headers = std::move(inheritedHeaders)](std::stop_token token) {
+        ResolveContext context{http_, logger_, token, headers};
+        auto result = resolvers_.Resolve(url, context);
+        resolving_.store(false);
+        if (closing_.load()) return;
+        QMetaObject::invokeMethod(this, [this, result = std::move(result)]() mutable {
+            if (!closing_.load()) HandleResolveResult(std::move(result));
+        }, Qt::QueuedConnection);
+    });
+}
+
+void QtPlayerWindow::HandleResolveResult(ResolveResult result) {
+    setWindowTitle(QStringLiteral("WannaViewer"));
+    if (result.status != ResolveStatus::Resolved) {
+        ShowError(QStringLiteral("URL resolver"), result.message);
+        return;
+    }
+    std::vector<const StreamVariant*> choices;
+    for (const auto& season : result.entry.seasons)
+        for (const auto& voice : season.voiceTracks)
+            for (const auto& episode : voice.episodes)
+                for (const auto& stream : episode.streams) choices.push_back(&stream);
+    if (choices.empty()) {
+        ShowError(QStringLiteral("URL resolver"), "Metadata was found, but no public playable stream is available");
+        return;
+    }
+    if (choices.size() == 1 && !choices.front()->protectedStream) {
+        OpenVariant(*choices.front());
+        return;
+    }
+    ShowSourceSelector(std::move(result));
+}
+
+void QtPlayerWindow::ShowSourceSelector(ResolveResult result) {
+    if (overlayMode_ != OverlayMode::None) HideOverlay();
+    sourceSelection_ = std::move(result);
+    sourceSeasonIndex_ = sourceVoiceIndex_ = sourceEpisodeIndex_ = sourceStreamIndex_ = -1;
+    bool foundPlayable = false;
+    for (std::size_t seasonIndex = 0; seasonIndex < sourceSelection_->entry.seasons.size() && !foundPlayable; ++seasonIndex) {
+        const auto& season = sourceSelection_->entry.seasons[seasonIndex];
+        for (std::size_t voiceIndex = 0; voiceIndex < season.voiceTracks.size() && !foundPlayable; ++voiceIndex) {
+            const auto& voice = season.voiceTracks[voiceIndex];
+            for (std::size_t episodeIndex = 0; episodeIndex < voice.episodes.size() && !foundPlayable; ++episodeIndex) {
+                const auto& episode = voice.episodes[episodeIndex];
+                for (std::size_t streamIndex = 0; streamIndex < episode.streams.size(); ++streamIndex) {
+                    if (episode.streams[streamIndex].protectedStream) continue;
+                    sourceSeasonIndex_ = static_cast<int>(seasonIndex);
+                    sourceVoiceIndex_ = static_cast<int>(voiceIndex);
+                    sourceEpisodeIndex_ = static_cast<int>(episodeIndex);
+                    sourceStreamIndex_ = static_cast<int>(streamIndex);
+                    foundPlayable = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!foundPlayable) {
+        sourceSeasonIndex_ = sourceSelection_->entry.seasons.empty() ? -1 : 0;
+        sourceVoiceIndex_ = sourceEpisodeIndex_ = sourceStreamIndex_ = 0;
+    }
+    sourceTitle_->setText(sourceSelection_->entry.title.empty()
+                              ? QStringLiteral("Choose an episode")
+                              : ToQString(sourceSelection_->entry.title));
+    PopulateSourceSeasons();
+    PopulateSourceVoices();
+    PopulateSourceEpisodes();
+    PopulateSourceStreams();
+    ShowControls(true, false);
+    UpdateVisibility();
+    sourceSeason_->setFocus();
+}
+
+void QtPlayerWindow::HideSourceSelector() {
+    sourceSelection_.reset();
+    sourceSeasonIndex_ = sourceVoiceIndex_ = sourceEpisodeIndex_ = sourceStreamIndex_ = -1;
+    sourceSeason_->clear(); sourceVoice_->clear(); sourceEpisode_->clear(); sourceStream_->clear();
+    sourceStatus_->clear();
+    sourceOpen_->setEnabled(false);
+    UpdateVisibility();
+    setFocus();
+}
+
+void QtPlayerWindow::PopulateSourceSeasons() {
+    const QSignalBlocker blocker(sourceSeason_);
+    sourceSeason_->clear();
+    if (!sourceSelection_) return;
+    const auto& seasons = sourceSelection_->entry.seasons;
+    for (const auto& season : seasons) sourceSeason_->addItem(DisplayLabel(season.title, "Default"));
+    if (sourceSeasonIndex_ < 0 || static_cast<std::size_t>(sourceSeasonIndex_) >= seasons.size())
+        sourceSeasonIndex_ = seasons.empty() ? -1 : 0;
+    sourceSeason_->setCurrentIndex(sourceSeasonIndex_);
+}
+
+void QtPlayerWindow::PopulateSourceVoices() {
+    const QSignalBlocker blocker(sourceVoice_);
+    sourceVoice_->clear();
+    if (!sourceSelection_ || sourceSeasonIndex_ < 0 ||
+        static_cast<std::size_t>(sourceSeasonIndex_) >= sourceSelection_->entry.seasons.size()) {
+        sourceVoiceIndex_ = -1;
+        return;
+    }
+    const auto& voices = sourceSelection_->entry.seasons[static_cast<std::size_t>(sourceSeasonIndex_)].voiceTracks;
+    for (const auto& voice : voices) sourceVoice_->addItem(DisplayLabel(voice.title, "Default"));
+    if (sourceVoiceIndex_ < 0 || static_cast<std::size_t>(sourceVoiceIndex_) >= voices.size()) {
+        sourceVoiceIndex_ = voices.empty() ? -1 : 0;
+        for (std::size_t index = 0; index < voices.size(); ++index) {
+            if (std::ranges::any_of(voices[index].episodes, [](const Episode& episode) { return !episode.streams.empty(); })) {
+                sourceVoiceIndex_ = static_cast<int>(index);
+                break;
+            }
+        }
+    }
+    sourceVoice_->setCurrentIndex(sourceVoiceIndex_);
+}
+
+void QtPlayerWindow::PopulateSourceEpisodes() {
+    const QSignalBlocker blocker(sourceEpisode_);
+    sourceEpisode_->clear();
+    if (!sourceSelection_ || sourceSeasonIndex_ < 0 || sourceVoiceIndex_ < 0) {
+        sourceEpisodeIndex_ = -1;
+        return;
+    }
+    const auto& season = sourceSelection_->entry.seasons[static_cast<std::size_t>(sourceSeasonIndex_)];
+    if (static_cast<std::size_t>(sourceVoiceIndex_) >= season.voiceTracks.size()) {
+        sourceEpisodeIndex_ = -1;
+        return;
+    }
+    const auto& episodes = season.voiceTracks[static_cast<std::size_t>(sourceVoiceIndex_)].episodes;
+    for (const auto& episode : episodes) sourceEpisode_->addItem(DisplayLabel(episode.title, "Episode"));
+    if (sourceEpisodeIndex_ < 0 || static_cast<std::size_t>(sourceEpisodeIndex_) >= episodes.size()) {
+        sourceEpisodeIndex_ = episodes.empty() ? -1 : 0;
+        for (std::size_t index = 0; index < episodes.size(); ++index) {
+            if (!episodes[index].streams.empty()) { sourceEpisodeIndex_ = static_cast<int>(index); break; }
+        }
+    }
+    sourceEpisode_->setCurrentIndex(sourceEpisodeIndex_);
+}
+
+void QtPlayerWindow::PopulateSourceStreams() {
+    const QSignalBlocker blocker(sourceStream_);
+    sourceStream_->clear();
+    if (!sourceSelection_ || sourceSeasonIndex_ < 0 || sourceVoiceIndex_ < 0 || sourceEpisodeIndex_ < 0) {
+        sourceStreamIndex_ = -1;
+    } else {
+        const auto& seasons = sourceSelection_->entry.seasons;
+        if (static_cast<std::size_t>(sourceSeasonIndex_) >= seasons.size()) sourceStreamIndex_ = -1;
+        else {
+            const auto& voices = seasons[static_cast<std::size_t>(sourceSeasonIndex_)].voiceTracks;
+            if (static_cast<std::size_t>(sourceVoiceIndex_) >= voices.size()) sourceStreamIndex_ = -1;
+            else {
+                const auto& episodes = voices[static_cast<std::size_t>(sourceVoiceIndex_)].episodes;
+                if (static_cast<std::size_t>(sourceEpisodeIndex_) >= episodes.size()) sourceStreamIndex_ = -1;
+                else {
+                    const auto& streams = episodes[static_cast<std::size_t>(sourceEpisodeIndex_)].streams;
+                    for (const auto& stream : streams) {
+                        QString label = DisplayLabel(stream.quality, "Auto");
+                        if (!stream.codec.empty()) label += QStringLiteral("  •  ") + ToQString(stream.codec);
+                        if (!stream.protocol.empty()) label += QStringLiteral("  •  ") + ToQString(stream.protocol);
+                        if (stream.protectedStream) label += QStringLiteral("  •  Protected");
+                        sourceStream_->addItem(label);
+                    }
+                    if (sourceStreamIndex_ < 0 || static_cast<std::size_t>(sourceStreamIndex_) >= streams.size()) {
+                        sourceStreamIndex_ = streams.empty() ? -1 : 0;
+                        for (std::size_t index = 0; index < streams.size(); ++index) {
+                            if (!streams[index].protectedStream) { sourceStreamIndex_ = static_cast<int>(index); break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sourceStream_->setCurrentIndex(sourceStreamIndex_);
+    UpdateSourceSelectionUi();
+}
+
+void QtPlayerWindow::UpdateSourceSelectionUi() {
+    const auto* selected = SelectedSource();
+    sourceOpen_->setEnabled(selected && !selected->protectedStream);
+    sourceStatus_->setText(!selected ? QStringLiteral("No source is available for this selection")
+                           : selected->protectedStream ? QStringLiteral("This source is protected and cannot be opened")
+                                                       : QStringLiteral("Choose a source and press Open"));
+}
+
+const StreamVariant* QtPlayerWindow::SelectedSource() const {
+    if (!sourceSelection_ || sourceSeasonIndex_ < 0 || sourceVoiceIndex_ < 0 ||
+        sourceEpisodeIndex_ < 0 || sourceStreamIndex_ < 0) return nullptr;
+    const auto& seasons = sourceSelection_->entry.seasons;
+    if (static_cast<std::size_t>(sourceSeasonIndex_) >= seasons.size()) return nullptr;
+    const auto& voices = seasons[static_cast<std::size_t>(sourceSeasonIndex_)].voiceTracks;
+    if (static_cast<std::size_t>(sourceVoiceIndex_) >= voices.size()) return nullptr;
+    const auto& episodes = voices[static_cast<std::size_t>(sourceVoiceIndex_)].episodes;
+    if (static_cast<std::size_t>(sourceEpisodeIndex_) >= episodes.size()) return nullptr;
+    const auto& streams = episodes[static_cast<std::size_t>(sourceEpisodeIndex_)].streams;
+    if (static_cast<std::size_t>(sourceStreamIndex_) >= streams.size()) return nullptr;
+    return &streams[static_cast<std::size_t>(sourceStreamIndex_)];
+}
+
+void QtPlayerWindow::OpenSelectedSource() {
+    const auto* stream = SelectedSource();
+    if (!stream) return;
+    if (stream->protectedStream) {
+        sourceStatus_->setText(QStringLiteral("This source is protected and cannot be opened"));
+        return;
+    }
+    const StreamVariant selected = *stream;
+    HideSourceSelector();
+    OpenVariant(selected);
+}
+
+void QtPlayerWindow::OpenVariant(const StreamVariant& stream) {
+    if (stream.protectedStream) {
+        ShowError(QStringLiteral("Provider"), "Provider unsupported: protected/DRM stream");
+        return;
+    }
+    if (stream.protocol == "embed") {
+        const auto provider = Url::Parse(stream.url);
+        if (provider && (provider->HostIs("kodikplayer.com") || provider->HostIs("alloha.yani.tv"))) {
+            browserRetryUrl_ = stream.url;
+            browserRetryHeaders_ = stream.headers;
+            browserRetriesRemaining_ = 1;
+        } else {
+            browserRetryUrl_.clear(); browserRetryHeaders_.clear(); browserRetriesRemaining_ = 0;
+        }
+        ResolveUrl(stream.url, stream.headers);
+        return;
+    }
+    std::vector<std::pair<std::string, std::string>> headers(stream.headers.begin(), stream.headers.end());
+    OpenMedia(stream.url, std::move(headers), stream.audioUrl);
+}
+
+bool QtPlayerWindow::RetryBrowserProvider() {
+    if (browserRetriesRemaining_ == 0 || browserRetryUrl_.empty() || resolving_.load()) return false;
+    --browserRetriesRemaining_;
+    engine_.Stop();
+    SetMediaLoaded(false);
+    playbackStarted_ = false;
+    ResolveUrl(browserRetryUrl_, browserRetryHeaders_);
+    return true;
+}
+
+void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
+    switch (event.type) {
+    case PlaybackEventType::StartFile:
+        playbackStarted_ = false;
+        startupTimeoutReported_ = false;
+        playbackLoadStarted_ = std::chrono::steady_clock::now();
+        setWindowTitle(QStringLiteral("WannaViewer — opening…"));
+        if (!uiTimer_->isActive()) uiTimer_->start();
+        break;
+    case PlaybackEventType::TracksChanged:
+        UpdateTracks();
+        break;
+    case PlaybackEventType::FileLoaded:
+        SetMediaLoaded(true);
+        setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark buffering")
+                                      : QStringLiteral("WannaViewer — buffering…"));
+        if (benchmarkMode_ && benchmarkProfile_ == "hardware-shader") ApplyShaderHotkey(2);
+        break;
+    case PlaybackEventType::PlaybackStarted:
+        playbackStarted_ = true;
+        browserRetryUrl_.clear(); browserRetryHeaders_.clear(); browserRetriesRemaining_ = 0;
+        setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark running")
+                                      : QStringLiteral("WannaViewer — playing"));
+        if (benchmarkMode_ && !benchmarkRunning_) {
+            benchmarkSamples_.clear();
+            benchmarkDroppedBaseline_ = benchmarkDelayedBaseline_ = -1;
+            benchmarkStart_ = std::chrono::steady_clock::now();
+            lastBenchmarkSample_ = benchmarkStart_;
+            benchmarkRunning_ = true;
+        }
+        RecordInteraction();
+        break;
+    case PlaybackEventType::EndFile:
+        if (benchmarkRunning_) FinishBenchmark();
+        break;
+    case PlaybackEventType::Error:
+        if (!playbackStarted_ && RetryBrowserProvider()) return;
+        if (!mediaLoaded_) {
+            mediaOpening_ = false;
+            UpdateVisibility();
+        }
+        ShowError(ToQString(event.name), event.value);
+        break;
+    case PlaybackEventType::VideoReconfigured:
+    case PlaybackEventType::PropertyChanged:
+        break;
+    }
+}
+
+void QtPlayerWindow::SetMediaLoaded(bool loaded) {
+    mediaLoaded_ = loaded;
+    mediaOpening_ = false;
+    timelineDragging_ = false;
+    displayedPlaying_.reset();
+    const std::array<QWidget*, 11> playbackControls{
+        playButton_, rewindButton_, forwardButton_, muteButton_, timeline_, volume_, subtitleButton_,
+        shaderButton_, statsButton_, settingsButton_, fullscreenButton_};
+    for (QWidget* widget : playbackControls)
+        widget->setEnabled(loaded);
+    audioButton_->setEnabled(loaded && !audioTrackIds_.empty());
+    videoButton_->setEnabled(loaded && !videoTrackIds_.empty());
+    if (!loaded) {
+        timeline_->setValue(0);
+        timeLabel_->setText(QStringLiteral("00:00  /  00:00"));
+        statisticsVisible_ = false;
+        controlsVisible_ = true;
+        controlsOpacity_->setOpacity(1.0);
+    }
+    UpdateVisibility();
+    if (loaded) {
+        uiTimer_->start();
+        RecordInteraction();
+    } else if (!benchmarkMode_) {
+        uiTimer_->stop();
+    }
+}
+
+void QtPlayerWindow::UpdateUi() {
+    if (!engineReady_) return;
+    const auto steadyNow = std::chrono::steady_clock::now();
+    if ((mediaOpening_ || mediaLoaded_) && !playbackStarted_ && !startupTimeoutReported_ &&
+        steadyNow - playbackLoadStarted_ > std::chrono::seconds(30)) {
+        startupTimeoutReported_ = true;
+        engine_.Stop();
+        SetMediaLoaded(false);
+        if (RetryBrowserProvider()) return;
+        setWindowTitle(QStringLiteral("WannaViewer"));
+        ShowError(QStringLiteral("Playback"),
+                  "Playback did not produce a frame within 30 seconds. The stream may have expired or rejected its media segments.");
+        return;
+    }
+    const double duration = engine_.Duration();
+    const double position = engine_.Position();
+    if (mediaLoaded_ && controlsVisible_ && !timelineDragging_) {
+        const int value = duration > 0.0
+            ? static_cast<int>(std::lround(std::clamp(position / duration, 0.0, 1.0) * 10000.0)) : 0;
+        const QSignalBlocker blocker(timeline_);
+        timeline_->setValue(value);
+        timeLabel_->setText(TimeText(position) + QStringLiteral("  /  ") + TimeText(duration));
+        const bool playing = !engine_.IsPaused();
+        if (!displayedPlaying_ || *displayedPlaying_ != playing) {
+            displayedPlaying_ = playing;
+            playButton_->setIcon(MakeIcon(playing ? Glyph::Pause : Glyph::Play));
+        }
+    }
+    if (statisticsVisible_ && (lastStatisticsUpdate_ == std::chrono::steady_clock::time_point{} ||
+        steadyNow - lastStatisticsUpdate_ >= std::chrono::milliseconds(500))) {
+        lastStatisticsUpdate_ = steadyNow;
+        statistics_->setText(ToQString(engine_.Statistics().ToDisplayText()));
+    }
+    if (benchmarkRunning_ && steadyNow - lastBenchmarkSample_ >= std::chrono::seconds(1)) {
+        lastBenchmarkSample_ = steadyNow;
+        auto sample = engine_.Statistics();
+        if (benchmarkDroppedBaseline_ < 0) {
+            benchmarkDroppedBaseline_ = sample.droppedFrames;
+            benchmarkDelayedBaseline_ = sample.delayedFrames;
+        }
+        benchmarkSamples_.push_back(std::move(sample));
+    }
+    if (benchmarkRunning_ && duration > 0.0 && position >= duration - 0.05) FinishBenchmark();
+    if (!controlsVisible_ && !statisticsVisible_ && !benchmarkMode_ && playbackStarted_) uiTimer_->stop();
+}
+
+void QtPlayerWindow::SeekFromSlider(bool commit) {
+    if (!mediaLoaded_) return;
+    const double duration = engine_.Duration();
+    if (duration <= 0.0) return;
+    const double seconds = duration * static_cast<double>(timeline_->value()) / 10000.0;
+    timeLabel_->setText(TimeText(seconds) + QStringLiteral("  /  ") + TimeText(duration));
+    timelineDragging_ = !commit;
+    if (commit) engine_.SeekAbsolute(seconds);
+    RecordInteraction();
+}
+
+void QtPlayerWindow::RecordInteraction() {
+    if (!mediaLoaded_ || overlayMode_ != OverlayMode::None || sourceSelection_) return;
+    ShowControls(true);
+    hideTimer_->start(kControlsHideDelayMs);
+    if (!uiTimer_->isActive()) uiTimer_->start();
+}
+
+void QtPlayerWindow::ShowControls(bool show, bool animated) {
+    if (!mediaLoaded_ || (!show && (overlayMode_ != OverlayMode::None || sourceSelection_))) return;
+    if (controlsVisible_ == show && controls_->isVisible() == show) return;
+    controlsVisible_ = show;
+    controlsAnimation_->stop();
+    if (show) {
+        controls_->show();
+        controls_->raise();
+    }
+    if (!animated || backgroundTest_) {
+        controlsOpacity_->setOpacity(show ? 1.0 : 0.0);
+        controls_->setVisible(show);
+        return;
+    }
+    controlsAnimation_->setDuration(show ? 140 : 105);
+    controlsAnimation_->setStartValue(controlsOpacity_->opacity());
+    controlsAnimation_->setEndValue(show ? 1.0 : 0.0);
+    controlsAnimation_->start();
+}
+
+bool QtPlayerWindow::CursorOverControls() const {
+    if (!controls_->isVisible()) return false;
+    const QRect globalRect(controls_->mapToGlobal(QPoint(0, 0)), controls_->size());
+    return globalRect.contains(QCursor::pos());
+}
+
+void QtPlayerWindow::UpdateTracks() {
+    audioTrackIds_.clear(); subtitleTrackIds_.clear(); videoTrackIds_.clear();
+    audioTrackLabels_.clear(); subtitleTrackLabels_.clear(); videoTrackLabels_.clear();
+    subtitleTrackLabels_.push_back(QStringLiteral("Off"));
+    subtitleTrackIds_.push_back(-1);
+    audioSelection_ = -1; subtitleSelection_ = 0; videoSelection_ = -1;
+    for (const auto& track : engine_.Tracks()) {
+        std::string label = track.title.empty() ? track.language : track.title;
+        if (label.empty() && track.type == "video" && track.height > 0)
+            label = std::format("{}p {}", track.height, track.codec);
+        if (label.empty()) label = std::format("{} {}", track.type, track.id);
+        if (track.type == "audio") {
+            audioTrackLabels_.push_back(ToQString(label)); audioTrackIds_.push_back(track.id);
+            if (track.selected) audioSelection_ = static_cast<int>(audioTrackIds_.size() - 1);
+        } else if (track.type == "sub") {
+            subtitleTrackLabels_.push_back(ToQString(label)); subtitleTrackIds_.push_back(track.id);
+            if (track.selected) subtitleSelection_ = static_cast<int>(subtitleTrackIds_.size() - 1);
+        } else if (track.type == "video") {
+            videoTrackLabels_.push_back(ToQString(label)); videoTrackIds_.push_back(track.id);
+            if (track.selected) videoSelection_ = static_cast<int>(videoTrackIds_.size() - 1);
+        }
+    }
+    if (audioSelection_ < 0 && !audioTrackIds_.empty()) audioSelection_ = 0;
+    if (videoSelection_ < 0 && !videoTrackIds_.empty()) videoSelection_ = 0;
+    audioButton_->setEnabled(mediaLoaded_ && !audioTrackIds_.empty());
+    subtitleButton_->setEnabled(mediaLoaded_);
+    videoButton_->setEnabled(mediaLoaded_ && !videoTrackIds_.empty());
+}
+
+void QtPlayerWindow::ToggleFullscreen() {
+    fullscreen_ = !fullscreen_;
+    if (fullscreen_) {
+        showFullScreen();
+        ShowControls(false, false);
+    } else {
+        showNormal();
+        RecordInteraction();
+    }
+}
+
+void QtPlayerWindow::ToggleStatistics() {
+    if (!mediaLoaded_) return;
+    statisticsVisible_ = !statisticsVisible_;
+    if (statisticsVisible_) {
+        lastStatisticsUpdate_ = {};
+        uiTimer_->start();
+    }
+    UpdateVisibility();
+    RecordInteraction();
+}
+
+void QtPlayerWindow::ShowAudioMenu() {
+    ShowChoiceOverlay(QStringLiteral("Audio track"), QStringLiteral("Choose the audio stream used for playback"),
+                      audioTrackLabels_, audioSelection_, OverlayAction::Audio);
+}
+
+void QtPlayerWindow::ShowSubtitleMenu() {
+    ShowChoiceOverlay(QStringLiteral("Subtitles"), QStringLiteral("Choose a subtitle track or turn subtitles off"),
+                      subtitleTrackLabels_, subtitleSelection_, OverlayAction::Subtitles);
+}
+
+void QtPlayerWindow::ShowVideoMenu() {
+    ShowChoiceOverlay(QStringLiteral("Video track"), QStringLiteral("Choose the video stream or quality"),
+                      videoTrackLabels_, videoSelection_, OverlayAction::Video);
+}
+
+void QtPlayerWindow::ShowShaderMenu() {
+    std::vector<QString> choices;
+    choices.reserve(shaders_.Presets().size() + 1U);
+    for (const auto& preset : shaders_.Presets()) choices.push_back(ToQString(preset.name));
+    choices.push_back(QStringLiteral("Custom GLSL…"));
+    ShowChoiceOverlay(QStringLiteral("Video shaders"), QStringLiteral("Choose a preset or load custom GLSL files"),
+                      std::move(choices), static_cast<int>(shaderPresetIndex_), OverlayAction::Shaders);
+}
+
+void QtPlayerWindow::ShowSettingsMenu() {
+    ShowChoiceOverlay(QStringLiteral("Playback settings"), QStringLiteral("Choose a setting to apply"),
+                      {QStringLiteral("Network cache  ·  Low latency"),
+                       QStringLiteral("Network cache  ·  Balanced"),
+                       QStringLiteral("Network cache  ·  Unstable connection"),
+                       QStringLiteral("Hardware decoding  ·  Auto"),
+                       QStringLiteral("Hardware decoding  ·  Off"),
+                       QStringLiteral("Frame pacing  ·  Display resample"),
+                       QStringLiteral("Frame pacing  ·  Audio clock")}, -1, OverlayAction::Settings);
+}
+
+void QtPlayerWindow::ShowChoiceOverlay(QString title, QString hint, std::vector<QString> choices,
+                                       int selected, OverlayAction action) {
+    if (choices.empty()) return;
+    if (sourceSelection_) HideSourceSelector();
+    overlayMode_ = OverlayMode::Choice;
+    overlayAction_ = action;
+    overlayChoices_ = std::move(choices);
+    overlayTitle_->setText(std::move(title));
+    overlayBody_->setText(std::move(hint));
+    overlayPrimary_->setText(QStringLiteral("Apply"));
+    overlaySecondary_->setText(QStringLiteral("Cancel"));
+    overlayEdit_->hide();
+    overlayList_->clear();
+    for (const auto& choice : overlayChoices_) overlayList_->addItem(choice);
+    overlayList_->show();
+    overlaySecondary_->show();
+    const int index = selected >= 0 && static_cast<std::size_t>(selected) < overlayChoices_.size() ? selected : 0;
+    overlayList_->setCurrentRow(index);
+    ShowControls(true, false);
+    UpdateVisibility();
+    overlayList_->setFocus();
+}
+
+void QtPlayerWindow::ShowMessageOverlay(QString title, QString detail) {
+    if (sourceSelection_) HideSourceSelector();
+    overlayMode_ = OverlayMode::Message;
+    overlayAction_ = OverlayAction::None;
+    overlayChoices_.clear();
+    overlayTitle_->setText(std::move(title));
+    overlayBody_->setText(std::move(detail));
+    overlayPrimary_->setText(QStringLiteral("Close"));
+    overlaySecondary_->hide();
+    overlayEdit_->hide();
+    overlayList_->hide();
+    ShowControls(true, false);
+    UpdateVisibility();
+    overlayPrimary_->setFocus();
+}
+
+void QtPlayerWindow::HideOverlay() {
+    overlayMode_ = OverlayMode::None;
+    overlayAction_ = OverlayAction::None;
+    overlayChoices_.clear();
+    overlayList_->clear();
+    overlayEdit_->clear();
+    UpdateVisibility();
+    setFocus();
+    RecordInteraction();
+}
+
+void QtPlayerWindow::ApplyOverlaySelection() {
+    if (overlayMode_ == OverlayMode::Message) { HideOverlay(); return; }
+    if (overlayMode_ == OverlayMode::Url) {
+        const QString value = overlayEdit_->text().trimmed();
+        if (value.isEmpty()) return;
+        HideOverlay();
+        ResolveUrl(ToUtf8(value));
+        return;
+    }
+    if (overlayMode_ != OverlayMode::Choice) return;
+    const int selected = overlayList_->currentRow();
+    if (selected < 0 || static_cast<std::size_t>(selected) >= overlayChoices_.size()) return;
+    const auto action = overlayAction_;
+    HideOverlay();
+    try {
+        if (action == OverlayAction::Audio && static_cast<std::size_t>(selected) < audioTrackIds_.size()) {
+            audioSelection_ = selected;
+            engine_.SetAudioTrack(audioTrackIds_[static_cast<std::size_t>(selected)]);
+        } else if (action == OverlayAction::Subtitles && static_cast<std::size_t>(selected) < subtitleTrackIds_.size()) {
+            subtitleSelection_ = selected;
+            engine_.SetSubtitleTrack(subtitleTrackIds_[static_cast<std::size_t>(selected)]);
+        } else if (action == OverlayAction::Video && static_cast<std::size_t>(selected) < videoTrackIds_.size()) {
+            videoSelection_ = selected;
+            engine_.SetVideoTrack(videoTrackIds_[static_cast<std::size_t>(selected)]);
+        } else if (action == OverlayAction::Shaders) {
+            ApplyShaderPreset(static_cast<std::size_t>(selected));
+        } else if (action == OverlayAction::Settings && selected >= 0 && selected <= 2) {
+            const std::string value = selected == 0 ? "low-latency" : selected == 2 ? "unstable" : "balanced";
+            engine_.ConfigureCache(value);
+            config_.Set("network.cache_mode", value);
+            config_.Save(paths_.config / "player.conf");
+        } else if (action == OverlayAction::Settings && (selected == 3 || selected == 4)) {
+            const bool enabled = selected == 3;
+            engine_.SetHardwareDecoding(enabled);
+            config_.Set("playback.hwdec", enabled ? "auto" : "no");
+            config_.Save(paths_.config / "player.conf");
+        } else if (action == OverlayAction::Settings && (selected == 5 || selected == 6)) {
+            const std::string value = selected == 5 ? "display-resample" : "audio";
+            engine_.SetVideoSync(value);
+            config_.Set("playback.video_sync", value);
+            config_.Save(paths_.config / "player.conf");
+        }
+    } catch (const std::exception& error) {
+        ShowError(QStringLiteral("Action failed"), error.what());
+    }
+}
+
+void QtPlayerWindow::ApplyShaderHotkey(int hotkey) {
+    if (!mediaLoaded_) return;
+    const auto* preset = shaders_.ForHotkey(hotkey);
+    if (!preset) return;
+    try {
+        engine_.SetShaders(shaders_.Resolve(*preset));
+        const auto iterator = std::ranges::find_if(shaders_.Presets(), [preset](const ShaderPreset& item) {
+            return item.id == preset->id;
+        });
+        shaderPresetIndex_ = iterator == shaders_.Presets().end()
+            ? 0U : static_cast<std::size_t>(std::distance(shaders_.Presets().begin(), iterator));
+    } catch (const std::exception& error) {
+        engine_.SetShaders({});
+        shaderPresetIndex_ = 0;
+        ShowError(QStringLiteral("Shader"), error.what());
+    }
+}
+
+void QtPlayerWindow::ApplyShaderPreset(std::size_t index) {
+    if (index == shaders_.Presets().size()) { OpenCustomShaders(); return; }
+    if (index >= shaders_.Presets().size()) return;
+    try {
+        engine_.SetShaders(shaders_.Resolve(shaders_.Presets()[index]));
+        shaderPresetIndex_ = index;
+    } catch (const std::exception& error) {
+        engine_.SetShaders({});
+        shaderPresetIndex_ = 0;
+        ShowError(QStringLiteral("Shader"), error.what());
+    }
+}
+
+void QtPlayerWindow::OpenCustomShaders() {
+    const QStringList files = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Open GLSL shaders"), QString(), QStringLiteral("GLSL shaders (*.glsl);;All files (*.*)"));
+    if (files.isEmpty()) return;
+    try {
+        const auto destinationRoot = paths_.shaders / "Custom";
+        std::filesystem::create_directories(destinationRoot);
+        std::vector<std::filesystem::path> imported;
+        imported.reserve(static_cast<std::size_t>(files.size()));
+        for (const auto& file : files) {
+            const std::filesystem::path source(ToUtf8(file));
+            if (source.extension() != ".glsl") throw std::runtime_error("Only .glsl files can be loaded as shaders");
+            const auto destination = destinationRoot / source.filename();
+            std::filesystem::copy_file(source, destination, std::filesystem::copy_options::overwrite_existing);
+            imported.push_back(std::filesystem::weakly_canonical(destination));
+        }
+        engine_.SetShaders(imported);
+        shaderPresetIndex_ = shaders_.Presets().size();
+    } catch (const std::exception& error) {
+        engine_.SetShaders({});
+        shaderPresetIndex_ = 0;
+        ShowError(QStringLiteral("Custom shaders"), error.what());
+    }
+}
+
+void QtPlayerWindow::ShowError(QString title, std::string_view detail) {
+    logger_.Write(LogLevel::Error, "ui", detail);
+    ShowMessageOverlay(std::move(title), ToQString(detail));
+}
+
+void QtPlayerWindow::LogHardwareInformation() {
+    SYSTEM_INFO system{};
+    GetNativeSystemInfo(&system);
+    logger_.Write(LogLevel::Info, "hardware", std::format("Windows architecture={} logical_processors={}",
+                  system.wProcessorArchitecture, system.dwNumberOfProcessors));
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return;
+    for (UINT adapterIndex = 0;; ++adapterIndex) {
+        IDXGIAdapter1* adapter = nullptr;
+        if (factory->EnumAdapters1(adapterIndex, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 description{};
+        if (SUCCEEDED(adapter->GetDesc1(&description)))
+            logger_.Write(LogLevel::Info, "hardware", "GPU: " + ToUtf8(QString::fromWCharArray(description.Description)));
+        for (UINT outputIndex = 0;; ++outputIndex) {
+            IDXGIOutput* output = nullptr;
+            if (adapter->EnumOutputs(outputIndex, &output) == DXGI_ERROR_NOT_FOUND) break;
+            IDXGIOutput6* output6 = nullptr;
+            if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&output6)))) {
+                DXGI_OUTPUT_DESC1 outputDescription{};
+                if (SUCCEEDED(output6->GetDesc1(&outputDescription))) {
+                    logger_.Write(LogLevel::Info, "hardware", std::format(
+                        "Display={} bits_per_color={} colorspace={} HDR_candidate={}",
+                        ToUtf8(QString::fromWCharArray(outputDescription.DeviceName)), outputDescription.BitsPerColor,
+                        static_cast<unsigned>(outputDescription.ColorSpace), outputDescription.BitsPerColor >= 10));
+                }
+                output6->Release();
+            }
+            output->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    DEVMODEW mode{sizeof(mode)};
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode)) {
+        logger_.Write(LogLevel::Info, "hardware", std::format("Primary display {}x{} {}bpp {}Hz",
+                      mode.dmPelsWidth, mode.dmPelsHeight, mode.dmBitsPerPel, mode.dmDisplayFrequency));
+    }
+}
+
+void QtPlayerWindow::FinishBenchmark() {
+    benchmarkRunning_ = false;
+    if (benchmarkSamples_.empty()) benchmarkSamples_.push_back(engine_.Statistics());
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - benchmarkStart_).count();
+    double cpuTotal = 0.0;
+    double cpuPeak = 0.0;
+    for (const auto& sample : benchmarkSamples_) {
+        cpuTotal += sample.cpuPercent;
+        cpuPeak = std::max(cpuPeak, sample.cpuPercent);
+    }
+    const auto& last = benchmarkSamples_.back();
+    const auto droppedAfterWarmup = std::max<std::int64_t>(0, last.droppedFrames - std::max<std::int64_t>(0, benchmarkDroppedBaseline_));
+    const auto delayedAfterWarmup = std::max<std::int64_t>(0, last.delayedFrames - std::max<std::int64_t>(0, benchmarkDelayedBaseline_));
+    nlohmann::json report{
+        {"file", benchmarkInput_}, {"profile", benchmarkProfile_}, {"elapsed_seconds", elapsed},
+        {"codec", last.videoCodec}, {"resolution", last.resolution}, {"fps", last.fps},
+        {"pixel_format", last.pixelFormat}, {"bit_depth", last.bitDepth}, {"hdr", last.hdrStatus},
+        {"decoder", last.hardwareDecoder}, {"renderer", last.gpuRenderer},
+        {"average_cpu_percent", cpuTotal / static_cast<double>(benchmarkSamples_.size())},
+        {"peak_cpu_percent", cpuPeak}, {"dropped_frames", droppedAfterWarmup},
+        {"delayed_frames", delayedAfterWarmup}, {"dropped_frames_total", last.droppedFrames},
+        {"delayed_frames_total", last.delayedFrames}, {"warmup_seconds", 1.0},
+        {"shader_configuration", last.shaderChain},
+        {"timing_note", "decode/render timing is not exposed by the stable libmpv client API in this build"}
+    };
+    const auto output = report.dump(2) + "\n";
+    std::ofstream(paths_.root / "benchmark.json", std::ios::trunc) << output;
+    logger_.Write(LogLevel::Info, "benchmark", "Benchmark completed; report written to benchmark.json");
+    close();
+}
+
+} // namespace wannaviewer
+
+#endif

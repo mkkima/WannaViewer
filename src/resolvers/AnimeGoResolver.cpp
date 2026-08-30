@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <regex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -166,15 +167,31 @@ ResolveResult AnimeGoResolver::ParsePageFixture(std::string_view pageHtml, std::
     VoiceTrack voice{"episodes", "Episodes", {}};
     const std::regex optionExpression(R"(<option\b([^>]*)>([\s\S]*?)</option>)", std::regex::icase);
     const HeaderMap headers{{"Referer", std::string(sourceUrl)}, {"Origin", Origin(*source)}};
+    std::unordered_set<std::string> episodeIds;
+    const auto appendEpisode = [&](std::string id, std::string title) {
+        if (voice.episodes.size() >= 500 || id.empty() ||
+            !std::ranges::all_of(id, [](unsigned char character) { return std::isdigit(character); }) ||
+            !episodeIds.insert(id).second) return;
+        if (title.empty()) title = "Episode " + std::to_string(voice.episodes.size() + 1);
+        const auto endpoint = Origin(*source) + "/player/videos/" + id;
+        voice.episodes.push_back({std::move(id), std::move(title),
+                                  {{endpoint, {}, "Choose voice/player", {}, "embed", headers, false}}});
+    };
     for (auto item = std::sregex_iterator(content.begin(), content.end(), optionExpression);
          item != std::sregex_iterator() && voice.episodes.size() < 500; ++item) {
         const auto id = Attribute((*item)[1].str(), "value");
-        if (id.empty() || !std::ranges::all_of(id, [](unsigned char character) { return std::isdigit(character); })) continue;
-        auto title = StripTags((*item)[2].str());
-        if (title.empty()) title = "Episode " + std::to_string(voice.episodes.size() + 1);
-        const auto endpoint = Origin(*source) + "/player/videos/" + id;
-        voice.episodes.push_back({id, std::move(title),
-                                  {{endpoint, {}, "Choose voice/player", {}, "embed", headers, false}}});
+        appendEpisode(id, StripTags((*item)[2].str()));
+    }
+    // Current AnimeGo catalogs publish episodes as carousel elements rather
+    // than <option> nodes. Keep both formats so cached/older page variants
+    // remain compatible and de-duplicate desktop/mobile representations.
+    const std::regex episodeElementExpression(R"(<(?:div|button)\b([^>]*)>)", std::regex::icase);
+    for (auto item = std::sregex_iterator(content.begin(), content.end(), episodeElementExpression);
+         item != std::sregex_iterator() && voice.episodes.size() < 500; ++item) {
+        const auto attributes = (*item)[1].str();
+        const auto id = Attribute(attributes, "data-episode");
+        const auto number = Attribute(attributes, "data-episode-number");
+        appendEpisode(id, number.empty() ? std::string{} : "Episode " + number);
     }
     if (voice.episodes.empty())
         return {ResolveStatus::Unsupported, "animego", "AnimeGo returned no public episodes", {result.entry.title, {}}};

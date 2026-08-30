@@ -8,6 +8,7 @@ $preset = "windows-x64-$configuration"
 
 & (Join-Path $PSScriptRoot 'bootstrap-mpv.ps1')
 & (Join-Path $PSScriptRoot 'bootstrap-anime4k.ps1')
+& (Join-Path $PSScriptRoot 'bootstrap-qt.ps1')
 if (-not $SkipYtDlp) { & (Join-Path $PSScriptRoot 'bootstrap-ytdlp.ps1') }
 
 & cmake --preset $preset

@@ -196,6 +196,18 @@ WV_TEST("AnimeGo catalog exposes episode endpoints without prefetching every pro
     WV_REQUIRE(episodes.front().streams.front().url == "https://animego.me/player/videos/37572");
 }
 
+WV_TEST("AnimeGo catalog accepts current carousel episode markup") {
+    wannaviewer::AnimeGoResolver resolver;
+    const auto result = resolver.ParsePageFixture(ReadFixture({"animego", "page.html"}),
+                                                  ReadFixture({"animego", "player-modern.json"}),
+                                                  "https://animego.me/anime/fixture-2855");
+    WV_REQUIRE(result.status == wannaviewer::ResolveStatus::Resolved);
+    const auto& episodes = result.entry.seasons.front().voiceTracks.front().episodes;
+    WV_REQUIRE(episodes.size() == 2);
+    WV_REQUIRE(episodes.front().title == "Episode 1");
+    WV_REQUIRE(episodes.front().streams.front().url == "https://animego.me/player/videos/37572");
+}
+
 WV_TEST("AnimeGo episode exposes CVH AniBoom and Kodik") {
     wannaviewer::AnimeGoResolver resolver;
     const auto result = resolver.ParseEpisodeFixture(ReadFixture({"animego", "episode.json"}),
@@ -258,7 +270,9 @@ WV_TEST("CVH fixtures filter the selected episode and voice then expose HLS") {
 WV_TEST("yt-dlp helper process uses machine-readable pinned executable") {
     const auto executable = std::filesystem::path(WANNAVIEWER_SOURCE_DIR) / "tools" / "yt-dlp.exe";
     if (!std::filesystem::is_regular_file(executable)) return;
-    const auto result = wannaviewer::RunProcess(executable, {"--version"}, std::chrono::seconds(10), 64U * 1024U);
+    // First launch can be delayed by Windows attachment scanning on clean
+    // machines. This test verifies the pinned helper, not cold-start latency.
+    const auto result = wannaviewer::RunProcess(executable, {"--version"}, std::chrono::seconds(30), 64U * 1024U);
     WV_REQUIRE(!result.timedOut);
     WV_REQUIRE(!result.cancelled);
     WV_REQUIRE(!result.outputTruncated);

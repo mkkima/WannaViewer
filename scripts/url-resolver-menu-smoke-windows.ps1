@@ -2,6 +2,7 @@
 param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
     [switch]$VerifyYummyPlayback,
+    [string]$CapturePath,
     [string[]]$Urls = @(
         'https://ru.yummyani.me/catalog/item/angel-po-sosedstvu-2',
         'https://animego.me/anime/dlya-tebya-bessmertnyy-3-2855'
@@ -34,6 +35,8 @@ public static class WannaViewerUrlSmokeNative {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint parameter, out int value, uint flags);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr value);
 
@@ -54,6 +57,10 @@ public static class WannaViewerUrlSmokeNative {
     }
 }
 '@
+
+$clientAnimationFlag = 1
+$clientAnimationsEnabled = -not [WannaViewerUrlSmokeNative]::SystemParametersInfo(
+    0x1042, 0, [ref]$clientAnimationFlag, 0) -or $clientAnimationFlag -ne 0
 
 function Find-ProcessWindow([int]$ProcessIdentifier, [string]$ClassName) {
     $script:foundUrlSmokeWindow = [IntPtr]::Zero
@@ -252,14 +259,24 @@ foreach ($url in $Urls) {
                 [void][WannaViewerUrlSmokeNative]::SendMessage(
                     $window, 0x0200, [IntPtr]::Zero, [IntPtr]::Zero)
                 $controlsHideDeadline = [DateTime]::UtcNow.AddSeconds(3)
+                $hidePositions = [Collections.Generic.List[int]]::new()
                 do {
-                    Start-Sleep -Milliseconds 50
+                    if ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
+                        $animationRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                        if ([WannaViewerUrlSmokeNative]::GetWindowRect($controlsBar, [ref]$animationRectangle)) {
+                            $hidePositions.Add($animationRectangle.Top)
+                        }
+                    }
+                    Start-Sleep -Milliseconds 15
                 } while ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar) -and
                          [DateTime]::UtcNow -lt $controlsHideDeadline)
                 if ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
                     $cursorNow = [WannaViewerUrlSmokeNative+POINT]::new()
                     [void][WannaViewerUrlSmokeNative]::GetCursorPos([ref]$cursorNow)
                     throw "Playback controls did not hide promptly after the cursor left the overlay; cursor=$($cursorNow.X),$($cursorNow.Y) bar=$($barRectangle.Left),$($barRectangle.Top),$($barRectangle.Right),$($barRectangle.Bottom)"
+                }
+                if ($clientAnimationsEnabled -and @($hidePositions | Sort-Object -Unique).Count -lt 3) {
+                    throw 'Playback controls did not animate through intermediate positions while hiding'
                 }
 
                 # Hiding changes the child window under the cursor. Windows may emit a
@@ -278,15 +295,50 @@ foreach ($url in $Urls) {
                     $windowRectangle.Top + 80)
                 [void][WannaViewerUrlSmokeNative]::SendMessage(
                     $window, 0x0200, [IntPtr]::Zero, [IntPtr]::Zero)
-                $controlsShowDeadline = [DateTime]::UtcNow.AddSeconds(1)
+                $showPositions = [Collections.Generic.List[int]]::new()
+                $controlsShowDeadline = [DateTime]::UtcNow.AddMilliseconds(400)
                 do {
-                    Start-Sleep -Milliseconds 25
-                } while (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar) -and
-                         [DateTime]::UtcNow -lt $controlsShowDeadline)
+                    if ([WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
+                        $animationRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                        if ([WannaViewerUrlSmokeNative]::GetWindowRect($controlsBar, [ref]$animationRectangle)) {
+                            $showPositions.Add($animationRectangle.Top)
+                        }
+                    }
+                    Start-Sleep -Milliseconds 15
+                } while ([DateTime]::UtcNow -lt $controlsShowDeadline)
                 if (-not [WannaViewerUrlSmokeNative]::IsWindowVisible($controlsBar)) {
                     throw 'Playback controls did not reappear after actual cursor movement'
                 }
-                Write-Host 'Playback controls stay hidden without movement and reappear after real movement.'
+                $finalBarRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                if (-not [WannaViewerUrlSmokeNative]::GetWindowRect($controlsBar, [ref]$finalBarRectangle) -or
+                    $finalBarRectangle.Top -ne $barRectangle.Top) {
+                    throw 'Playback controls appearance animation did not settle at the original overlay position'
+                }
+                if ($clientAnimationsEnabled -and @($showPositions | Sort-Object -Unique).Count -lt 3) {
+                    throw 'Playback controls did not animate through intermediate positions while appearing'
+                }
+                if ($CapturePath) {
+                    Add-Type -AssemblyName System.Drawing
+                    [void][WannaViewerUrlSmokeNative]::SetForegroundWindow($window)
+                    Start-Sleep -Milliseconds 80
+                    $captureRectangle = [WannaViewerUrlSmokeNative+RECT]::new()
+                    if (-not [WannaViewerUrlSmokeNative]::GetWindowRect($window, [ref]$captureRectangle)) {
+                        throw 'Unable to read the player rectangle for visual capture'
+                    }
+                    $captureWidth = $captureRectangle.Right - $captureRectangle.Left
+                    $captureHeight = $captureRectangle.Bottom - $captureRectangle.Top
+                    $bitmap = [Drawing.Bitmap]::new($captureWidth, $captureHeight)
+                    $graphics = [Drawing.Graphics]::FromImage($bitmap)
+                    try {
+                        $graphics.CopyFromScreen($captureRectangle.Left, $captureRectangle.Top, 0, 0,
+                            [Drawing.Size]::new($captureWidth, $captureHeight))
+                        $bitmap.Save($CapturePath, [Drawing.Imaging.ImageFormat]::Png)
+                    } finally {
+                        $graphics.Dispose()
+                        $bitmap.Dispose()
+                    }
+                }
+                Write-Host 'Playback controls animate smoothly, stay hidden without movement, and reappear after real movement.'
             }
         }
         if ((Find-ProcessWindow $process.Id '#32768') -ne [IntPtr]::Zero) {

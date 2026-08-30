@@ -52,6 +52,8 @@ private:
     void AddTooltip(HWND control, const wchar_t* text);
     void SetMediaLoaded(bool loaded);
     void ShowControls(bool show);
+    void UpdateControlsAnimation(ULONGLONG now);
+    [[nodiscard]] bool ControlsAnimationActive() const noexcept;
     void RecordInteraction();
     void RecordMouseMovement();
     [[nodiscard]] bool IsCursorOverControls() const noexcept;
@@ -151,6 +153,7 @@ private:
     HWND overlaySecondaryButton_{nullptr};
     HWND tooltip_{nullptr};
     HFONT font_{nullptr};
+    HFONT iconFont_{nullptr};
     HFONT titleFont_{nullptr};
     HBRUSH backgroundBrush_{nullptr};
     HBRUSH panelBrush_{nullptr};
@@ -180,6 +183,10 @@ private:
     DWORD previousStyle_{0};
     ULONGLONG lastInteraction_{0};
     POINT lastMousePosition_{};
+    ULONGLONG controlsAnimationStarted_{0};
+    ULONGLONG controlsAnimationDuration_{0};
+    double controlsAnimationFrom_{1.0};
+    double controlsAnimationProgress_{1.0};
     unsigned timerTick_{0};
     unsigned benchmarkTick_{0};
     unsigned dpi_{96};
@@ -188,6 +195,7 @@ private:
     int subtitleSelection_{0};
     int videoSelection_{-1};
     bool hasLastMousePosition_{false};
+    bool animationsEnabled_{true};
     bool controlsVisible_{true};
     bool statisticsVisible_{false};
     bool mediaLoaded_{false};

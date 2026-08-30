@@ -39,6 +39,9 @@ constexpr UINT kInteractionMessage = WM_APP + 3;
 constexpr UINT kTimelineHoverMessage = WM_APP + 4;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr ULONGLONG kControlsHideDelayMs = 1500;
+constexpr ULONGLONG kControlsShowAnimationMs = 160;
+constexpr ULONGLONG kControlsHideAnimationMs = 120;
+constexpr UINT kControlsAnimationTimerMs = 16;
 constexpr wchar_t kHoverProperty[] = L"WannaViewer.Hovered";
 constexpr int kPlay = 100;
 constexpr int kTimeline = 101;
@@ -361,6 +364,7 @@ PlayerWindow::~PlayerWindow() {
     if (resolverThread_.joinable()) { resolverThread_.request_stop(); resolverThread_.join(); }
     engine_.Shutdown();
     if (font_) DeleteObject(font_);
+    if (iconFont_) DeleteObject(iconFont_);
     if (titleFont_) DeleteObject(titleFont_);
     if (backgroundBrush_) DeleteObject(backgroundBrush_);
     if (panelBrush_) DeleteObject(panelBrush_);
@@ -376,6 +380,9 @@ void PlayerWindow::Create(HINSTANCE instance, int showCommand) {
     Gdiplus::GdiplusStartupInput graphicsStartup;
     if (Gdiplus::GdiplusStartup(&gdiplusToken_, &graphicsStartup, nullptr) != Gdiplus::Ok)
         throw std::runtime_error("Unable to initialize anti-aliased UI rendering");
+    BOOL clientAnimations = TRUE;
+    if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0))
+        animationsEnabled_ = clientAnimations != FALSE;
     WNDCLASSEXW type{sizeof(type)};
     type.style = CS_DBLCLKS;
     type.lpfnWndProc = WindowProcedure;
@@ -599,9 +606,13 @@ void PlayerWindow::OpenMedia(std::string value,
 
 void PlayerWindow::CreateFonts() {
     if (font_) DeleteObject(font_);
+    if (iconFont_) DeleteObject(iconFont_);
     if (titleFont_) DeleteObject(titleFont_);
     font_ = CreateFontW(-Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+    iconFont_ = CreateFontW(-Scale(11), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
     titleFont_ = CreateFontW(-Scale(26), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Display");
     for (HWND control : {playButton_, rewindButton_, forwardButton_, muteButton_, timeLabel_, audio_, subtitles_, videoQuality_, shader_, statsButton_,
@@ -637,7 +648,8 @@ void PlayerWindow::LayoutControls() {
     const int height = client.bottom;
     const bool selectorVisible = sourceSelection_.has_value();
     const bool overlayVisible = overlayMode_ != OverlayMode::None;
-    const bool chromeVisible = controlsVisible_ && mediaLoaded_ && !selectorVisible && !overlayVisible;
+    const bool chromeVisible = mediaLoaded_ && !selectorVisible && !overlayVisible &&
+                               (controlsVisible_ || controlsAnimationProgress_ > 0.0);
     const auto layout = ui::ComputeControlLayout(width, height, dpi_, chromeVisible);
     compactLayout_ = layout.compact;
     const auto place = [](HWND control, const ui::Rect& rectangle) {
@@ -654,21 +666,29 @@ void PlayerWindow::LayoutControls() {
         return rectangle;
     };
     place(video_, layout.video);
-    place(controlsBar_, layout.bar);
-    place(timeline_, layout.timeline);
-    place(timeLabel_, layout.time);
-    place(playButton_, layout.play);
-    place(rewindButton_, layout.rewind);
-    place(forwardButton_, layout.forward);
-    place(muteButton_, layout.mute);
-    place(volume_, layout.volume);
-    place(audio_, layout.audio);
-    place(subtitles_, layout.subtitles);
-    place(videoQuality_, layout.quality);
-    place(shader_, layout.shaders);
-    place(statsButton_, layout.statistics);
-    place(fullscreenButton_, layout.fullscreen);
-    place(settingsButton_, layout.settings);
+    const int chromeOffset = chromeVisible
+        ? static_cast<int>(std::lround(static_cast<double>(layout.bar.height) *
+                                      (1.0 - std::clamp(controlsAnimationProgress_, 0.0, 1.0))))
+        : 0;
+    const auto animated = [chromeOffset](ui::Rect rectangle) {
+        if (rectangle.visible) rectangle.y += chromeOffset;
+        return rectangle;
+    };
+    place(controlsBar_, animated(layout.bar));
+    place(timeline_, animated(layout.timeline));
+    place(timeLabel_, animated(layout.time));
+    place(playButton_, animated(layout.play));
+    place(rewindButton_, animated(layout.rewind));
+    place(forwardButton_, animated(layout.forward));
+    place(muteButton_, animated(layout.mute));
+    place(volume_, animated(layout.volume));
+    place(audio_, animated(layout.audio));
+    place(subtitles_, animated(layout.subtitles));
+    place(videoQuality_, animated(layout.quality));
+    place(shader_, animated(layout.shaders));
+    place(statsButton_, animated(layout.statistics));
+    place(fullscreenButton_, animated(layout.fullscreen));
+    place(settingsButton_, animated(layout.settings));
 
     const bool showEmpty = !mediaLoaded_ && !mediaOpening_ && !benchmarkMode_ && !selectorVisible && !overlayVisible;
     MoveWindow(emptyState_, layout.emptyState.x, layout.emptyState.y, layout.emptyState.width, layout.emptyState.height, TRUE);
@@ -746,7 +766,12 @@ void PlayerWindow::SetMediaLoaded(bool loaded) {
     EnableWindow(videoQuality_, loaded && !videoTrackIds_.empty());
     EnableWindow(shader_, loaded);
     EnableWindow(statsButton_, loaded);
-    if (!loaded) controlsVisible_ = true;
+    if (!loaded) {
+        controlsVisible_ = true;
+        controlsAnimationFrom_ = 1.0;
+        controlsAnimationProgress_ = 1.0;
+        controlsAnimationDuration_ = 0;
+    }
     LayoutControls();
     UpdateActiveTimer();
 }
@@ -754,6 +779,8 @@ void PlayerWindow::SetMediaLoaded(bool loaded) {
 void PlayerWindow::ShowControls(bool show) {
     if (!show && (sourceSelection_ || overlayMode_ != OverlayMode::None)) return;
     if (controlsVisible_ == show) return;
+    const ULONGLONG now = GetTickCount64();
+    UpdateControlsAnimation(now);
     if (!show) {
         POINT cursor{};
         if (GetCursorPos(&cursor)) {
@@ -762,9 +789,36 @@ void PlayerWindow::ShowControls(bool show) {
         }
     }
     controlsVisible_ = show;
+    const double target = show ? 1.0 : 0.0;
+    const ULONGLONG fullDuration = show ? kControlsShowAnimationMs : kControlsHideAnimationMs;
+    const double remaining = std::abs(target - controlsAnimationProgress_);
+    controlsAnimationFrom_ = controlsAnimationProgress_;
+    controlsAnimationStarted_ = now;
+    controlsAnimationDuration_ = animationsEnabled_
+        ? static_cast<ULONGLONG>(std::lround(static_cast<double>(fullDuration) * remaining))
+        : 0;
+    if (controlsAnimationDuration_ == 0) controlsAnimationProgress_ = target;
     LayoutControls();
     if (!show) SetFocus(window_);
     UpdateActiveTimer();
+}
+
+bool PlayerWindow::ControlsAnimationActive() const noexcept {
+    return controlsAnimationDuration_ != 0;
+}
+
+void PlayerWindow::UpdateControlsAnimation(ULONGLONG now) {
+    if (!ControlsAnimationActive()) return;
+    const double elapsed = static_cast<double>(now - controlsAnimationStarted_);
+    const double linear = std::clamp(elapsed / static_cast<double>(controlsAnimationDuration_), 0.0, 1.0);
+    const double eased = linear * linear * (3.0 - 2.0 * linear);
+    const double target = controlsVisible_ ? 1.0 : 0.0;
+    controlsAnimationProgress_ = controlsAnimationFrom_ + (target - controlsAnimationFrom_) * eased;
+    if (linear >= 1.0) {
+        controlsAnimationProgress_ = target;
+        controlsAnimationDuration_ = 0;
+    }
+    LayoutControls();
 }
 
 void PlayerWindow::RecordInteraction() {
@@ -796,7 +850,9 @@ bool PlayerWindow::IsCursorOverControls() const noexcept {
 
 void PlayerWindow::UpdateActiveTimer() {
     const bool waitingForFirstFrame = (mediaOpening_ || mediaLoaded_) && !playbackStarted_;
-    if ((mediaLoaded_ && controlsVisible_) || waitingForFirstFrame || statisticsVisible_ || benchmarkMode_ ||
+    if (ControlsAnimationActive())
+        SetTimer(window_, kUiTimer, kControlsAnimationTimerMs, nullptr);
+    else if ((mediaLoaded_ && controlsVisible_) || waitingForFirstFrame || statisticsVisible_ || benchmarkMode_ ||
         sourceSelection_ || overlayMode_ != OverlayMode::None)
         SetTimer(window_, kUiTimer, 250, nullptr);
     else KillTimer(window_, kUiTimer);
@@ -1026,7 +1082,7 @@ void PlayerWindow::ShowChoiceOverlay(std::wstring title, std::wstring hint,
     SendMessageW(overlayList_, LB_SETHORIZONTALEXTENT, 0, 0);
     for (const auto& choice : overlayChoices_) AddListText(overlayList_, choice);
     SendMessageW(overlayList_, LB_SETCURSEL, static_cast<WPARAM>(overlaySelection_), 0);
-    controlsVisible_ = true;
+    ShowControls(true);
     LayoutControls();
     UpdateActiveTimer();
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -1044,7 +1100,7 @@ void PlayerWindow::ShowUrlOverlay() {
     SetWindowTextW(overlayPrimaryButton_, L"Open");
     SetWindowTextW(overlaySecondaryButton_, L"Cancel");
     SetWindowTextW(overlayEdit_, L"https://");
-    controlsVisible_ = true;
+    ShowControls(true);
     LayoutControls();
     UpdateActiveTimer();
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -1061,7 +1117,7 @@ void PlayerWindow::ShowMessageOverlay(std::wstring title, std::wstring detail) {
     SetWindowTextW(overlayTitle_, title.c_str());
     SetWindowTextW(overlayBody_, detail.c_str());
     SetWindowTextW(overlayPrimaryButton_, L"Close");
-    controlsVisible_ = true;
+    ShowControls(true);
     LayoutControls();
     UpdateActiveTimer();
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -1233,7 +1289,7 @@ void PlayerWindow::ShowSourceSelector(ResolveResult result) {
     PopulateSourceVoices();
     PopulateSourceEpisodes();
     PopulateSourceStreams();
-    controlsVisible_ = true;
+    ShowControls(true);
     LayoutControls();
     UpdateActiveTimer();
     if (sourceSeasonList_ && IsWindowEnabled(sourceSeasonList_)) SetFocus(sourceSeasonList_);
@@ -1527,85 +1583,89 @@ void PlayerWindow::DrawPlayerIcon(HDC dc, UINT id, const RECT& rectangle, bool e
     const COLORREF color = enabled ? kTextColor : RGB(92, 92, 92);
     const float cx = static_cast<float>(rectangle.left + rectangle.right) / 2.0F;
     const float cy = static_cast<float>(rectangle.top + rectangle.bottom) / 2.0F;
-    const float r = static_cast<float>(Scale(12));
-    const auto s = [this](int value) { return static_cast<float>(Scale(value)); };
+    const float density = static_cast<float>(std::max(1U, dpi_)) / 96.0F;
+    const auto s = [density](float value) { return value * density; };
+    const float r = s(9.25F);
     bool drawTen = false;
     bool drawHd = false;
     {
         Gdiplus::Graphics graphics(dc);
         ConfigureSmoothGraphics(graphics);
-        Gdiplus::Pen pen(SmoothColor(color), static_cast<float>(std::max(1, Scale(2))));
+        Gdiplus::Pen pen(SmoothColor(color), std::max(1.25F, s(1.75F)));
         pen.SetStartCap(Gdiplus::LineCapRound);
         pen.SetEndCap(Gdiplus::LineCapRound);
         pen.SetLineJoin(Gdiplus::LineJoinRound);
         if (id == kPlay) {
             if (mediaLoaded_ && !engine_.IsPaused()) {
-                graphics.DrawLine(&pen, cx - s(5), cy - s(10), cx - s(5), cy + s(10));
-                graphics.DrawLine(&pen, cx + s(5), cy - s(10), cx + s(5), cy + s(10));
+                graphics.DrawLine(&pen, cx - s(3.5F), cy - s(8.5F), cx - s(3.5F), cy + s(8.5F));
+                graphics.DrawLine(&pen, cx + s(3.5F), cy - s(8.5F), cx + s(3.5F), cy + s(8.5F));
             } else {
-                const Gdiplus::PointF points[]{{cx - s(7), cy - s(11)}, {cx - s(7), cy + s(11)},
-                                               {cx + s(11), cy}};
+                const Gdiplus::PointF points[]{{cx - s(5.5F), cy - s(8.5F)},
+                                               {cx - s(5.5F), cy + s(8.5F)},
+                                               {cx + s(7.5F), cy}};
                 graphics.DrawPolygon(&pen, points, static_cast<INT>(std::size(points)));
             }
         } else if (id == kRewind || id == kForward) {
             const bool forward = id == kForward;
             graphics.DrawArc(&pen, cx - r, cy - r, r * 2.0F, r * 2.0F,
-                             forward ? -105.0F : 15.0F, forward ? 270.0F : -270.0F);
-            const float arrowX = forward ? cx + r * 0.78F : cx - r * 0.78F;
-            const Gdiplus::PointF arrow[]{{arrowX, cy - r},
-                {arrowX + (forward ? -s(6) : s(6)), cy - r - s(3)},
-                {arrowX + (forward ? -s(5) : s(5)), cy - r + s(4)}};
+                             forward ? -120.0F : -60.0F, forward ? 285.0F : -285.0F);
+            const float direction = forward ? 1.0F : -1.0F;
+            const Gdiplus::PointF arrow[]{{cx + direction * s(3.25F), cy - s(8.25F)},
+                                          {cx + direction * s(8.25F), cy - s(5.75F)},
+                                          {cx + direction * s(7.5F), cy - s(0.5F)}};
             graphics.DrawLines(&pen, arrow, static_cast<INT>(std::size(arrow)));
             drawTen = true;
         } else if (id == kMute) {
-            const Gdiplus::PointF speaker[]{{cx - s(12), cy - s(5)}, {cx - s(6), cy - s(5)},
-                {cx, cy - s(11)}, {cx, cy + s(11)}, {cx - s(6), cy + s(5)},
-                {cx - s(12), cy + s(5)}, {cx - s(12), cy - s(5)}};
+            const Gdiplus::PointF speaker[]{{cx - s(9.5F), cy - s(4.25F)},
+                {cx - s(5.0F), cy - s(4.25F)}, {cx - s(0.5F), cy - s(8.5F)},
+                {cx - s(0.5F), cy + s(8.5F)}, {cx - s(5.0F), cy + s(4.25F)},
+                {cx - s(9.5F), cy + s(4.25F)}, {cx - s(9.5F), cy - s(4.25F)}};
             graphics.DrawLines(&pen, speaker, static_cast<INT>(std::size(speaker)));
-            graphics.DrawArc(&pen, cx - s(5), cy - s(8), s(16), s(16), -52.0F, 104.0F);
-            graphics.DrawArc(&pen, cx - s(4), cy - s(13), s(24), s(26), -52.0F, 104.0F);
+            graphics.DrawArc(&pen, cx - s(2.75F), cy - s(5.0F), s(9.0F), s(10.0F), -48.0F, 96.0F);
+            graphics.DrawArc(&pen, cx - s(2.0F), cy - s(8.25F), s(15.0F), s(16.5F), -48.0F, 96.0F);
         } else if (id == kAudio) {
-            graphics.DrawLine(&pen, cx + s(5), cy - s(11), cx + s(5), cy + s(5));
-            graphics.DrawLine(&pen, cx + s(5), cy - s(11), cx + s(13), cy - s(8));
-            graphics.DrawEllipse(&pen, cx - s(4), cy + s(2), s(10), s(8));
+            graphics.DrawLine(&pen, cx + s(2.5F), cy - s(8.5F), cx + s(2.5F), cy + s(5.0F));
+            graphics.DrawLine(&pen, cx + s(2.5F), cy - s(8.5F), cx + s(8.5F), cy - s(6.25F));
+            graphics.DrawEllipse(&pen, cx - s(4.25F), cy + s(2.25F), s(7.25F), s(5.75F));
         } else if (id == kSubtitles) {
             Gdiplus::GraphicsPath path;
-            AddRoundedRectangle(path, Gdiplus::RectF(cx - s(14), cy - s(10), s(28), s(20)), s(6));
+            AddRoundedRectangle(path, Gdiplus::RectF(cx - s(11.0F), cy - s(8.0F),
+                                                     s(22.0F), s(16.0F)), s(4.0F));
             graphics.DrawPath(&pen, &path);
-            for (int offset : {-4, 2}) {
-                graphics.DrawLine(&pen, cx - s(9), cy + s(offset), cx - s(1), cy + s(offset));
-                graphics.DrawLine(&pen, cx + s(2), cy + s(offset), cx + s(9), cy + s(offset));
+            for (float offset : {-3.0F, 2.0F}) {
+                graphics.DrawLine(&pen, cx - s(7.0F), cy + s(offset), cx - s(1.0F), cy + s(offset));
+                graphics.DrawLine(&pen, cx + s(2.0F), cy + s(offset), cx + s(7.0F), cy + s(offset));
             }
         } else if (id == kVideoQuality) {
             Gdiplus::GraphicsPath path;
-            AddRoundedRectangle(path, Gdiplus::RectF(cx - s(14), cy - s(10), s(28), s(20)), s(5));
+            AddRoundedRectangle(path, Gdiplus::RectF(cx - s(11.0F), cy - s(8.0F),
+                                                     s(22.0F), s(16.0F)), s(4.0F));
             graphics.DrawPath(&pen, &path);
             drawHd = true;
         } else if (id == kShader) {
-            graphics.DrawLine(&pen, cx, cy - s(13), cx, cy + s(13));
-            graphics.DrawLine(&pen, cx - s(13), cy, cx + s(13), cy);
-            graphics.DrawLine(&pen, cx - s(9), cy - s(9), cx + s(9), cy + s(9));
-            graphics.DrawLine(&pen, cx + s(9), cy - s(9), cx - s(9), cy + s(9));
-            graphics.DrawEllipse(&pen, cx - s(4), cy - s(4), s(8), s(8));
+            const Gdiplus::PointF sparkle[]{{cx, cy - s(10.0F)}, {cx + s(2.0F), cy - s(2.0F)},
+                {cx + s(10.0F), cy}, {cx + s(2.0F), cy + s(2.0F)}, {cx, cy + s(10.0F)},
+                {cx - s(2.0F), cy + s(2.0F)}, {cx - s(10.0F), cy}, {cx - s(2.0F), cy - s(2.0F)}};
+            graphics.DrawPolygon(&pen, sparkle, static_cast<INT>(std::size(sparkle)));
         } else if (id == kStatistics) {
-            graphics.DrawLine(&pen, cx - s(13), cy + s(11), cx + s(13), cy + s(11));
-            graphics.DrawRectangle(&pen, cx - s(11), cy + s(1), s(5), s(9));
-            graphics.DrawRectangle(&pen, cx - s(3), cy - s(5), s(5), s(15));
-            graphics.DrawRectangle(&pen, cx + s(5), cy - s(11), s(5), s(21));
+            graphics.DrawLine(&pen, cx - s(10.0F), cy + s(8.5F), cx + s(10.0F), cy + s(8.5F));
+            graphics.DrawLine(&pen, cx - s(6.5F), cy + s(7.5F), cx - s(6.5F), cy + s(1.5F));
+            graphics.DrawLine(&pen, cx, cy + s(7.5F), cx, cy - s(3.0F));
+            graphics.DrawLine(&pen, cx + s(6.5F), cy + s(7.5F), cx + s(6.5F), cy - s(8.5F));
         } else if (id == kSettings) {
-            graphics.DrawEllipse(&pen, cx - s(10), cy - s(10), s(20), s(20));
-            graphics.DrawEllipse(&pen, cx - s(4), cy - s(4), s(8), s(8));
+            graphics.DrawEllipse(&pen, cx - s(7.25F), cy - s(7.25F), s(14.5F), s(14.5F));
+            graphics.DrawEllipse(&pen, cx - s(2.5F), cy - s(2.5F), s(5.0F), s(5.0F));
             for (int i = 0; i < 8; ++i) {
                 const double angle = 3.14159265358979323846 * static_cast<double>(i) / 4.0;
                 graphics.DrawLine(&pen,
-                    cx + static_cast<float>(std::cos(angle)) * s(11),
-                    cy + static_cast<float>(std::sin(angle)) * s(11),
-                    cx + static_cast<float>(std::cos(angle)) * s(15),
-                    cy + static_cast<float>(std::sin(angle)) * s(15));
+                    cx + static_cast<float>(std::cos(angle)) * s(8.25F),
+                    cy + static_cast<float>(std::sin(angle)) * s(8.25F),
+                    cx + static_cast<float>(std::cos(angle)) * s(10.75F),
+                    cy + static_cast<float>(std::sin(angle)) * s(10.75F));
             }
         } else if (id == kFullscreen) {
-            const float outer = s(13);
-            const float inner = s(6);
+            const float outer = s(10.0F);
+            const float inner = s(4.5F);
             const Gdiplus::PointF topLeft[]{{cx - outer, cy - inner}, {cx - outer, cy - outer},
                                             {cx - inner, cy - outer}};
             const Gdiplus::PointF topRight[]{{cx + inner, cy - outer}, {cx + outer, cy - outer},
@@ -1623,11 +1683,14 @@ void PlayerWindow::DrawPlayerIcon(HDC dc, UINT id, const RECT& rectangle, bool e
     if (drawTen || drawHd) {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, color);
-        SelectObject(dc, font_);
-        RECT text{static_cast<LONG>(cx - s(12)), static_cast<LONG>(cy - s(9)),
-                  static_cast<LONG>(cx + s(12)), static_cast<LONG>(cy + s(10))};
+        const HGDIOBJ previousFont = SelectObject(dc, iconFont_ ? iconFont_ : font_);
+        RECT text{static_cast<LONG>(std::lround(cx - s(8.0F))),
+                  static_cast<LONG>(std::lround(cy - s(6.5F))),
+                  static_cast<LONG>(std::lround(cx + s(8.0F))),
+                  static_cast<LONG>(std::lround(cy + s(7.0F)))};
         DrawTextW(dc, drawTen ? L"10" : L"HD", -1, &text,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (previousFont) SelectObject(dc, previousFont);
     }
 }
 
@@ -1733,6 +1796,7 @@ LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
     const bool enabled = (item.itemState & ODS_DISABLED) == 0;
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool hot = GetPropW(item.hwndItem, kHoverProperty) != nullptr;
+    const bool focused = (item.itemState & ODS_FOCUS) != 0;
     const bool chrome = item.CtlID == kPlay || item.CtlID == kRewind || item.CtlID == kForward ||
                         item.CtlID == kMute || item.CtlID == kAudio || item.CtlID == kSubtitles ||
                         item.CtlID == kVideoQuality || item.CtlID == kShader || item.CtlID == kStatistics ||
@@ -1742,7 +1806,7 @@ LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
                         (item.CtlID == kSubtitles && subtitleSelection_ > 0);
     if (chrome) {
         FillRect(item.hDC, &rectangle, panelBrush_);
-        if (hot || pressed || active) {
+        if (hot || pressed || active || focused) {
             RECT hover = rectangle; InflateRect(&hover, -Scale(3), -Scale(3));
             const int diameter = std::min(hover.right - hover.left, hover.bottom - hover.top);
             FillRoundedRectangle(item.hDC, hover,
@@ -1766,7 +1830,7 @@ LRESULT PlayerWindow::DrawControl(const DRAWITEMSTRUCT& item) {
         DrawTextW(item.hDC, text, -1, &textRect,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
-    if ((item.itemState & ODS_FOCUS) != 0) {
+    if (focused && !chrome) {
         RECT focus = rectangle;
         InflateRect(&focus, -Scale(5), -Scale(5));
         const int diameter = std::min(focus.right - focus.left, focus.bottom - focus.top);
@@ -1879,11 +1943,14 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_TIMER:
         if (wParam == kUiTimer) {
+            UpdateControlsAnimation(GetTickCount64());
             UpdateUi();
-            if (mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None &&
+            if (!ControlsAnimationActive() && mediaLoaded_ && controlsVisible_ &&
+                !sourceSelection_ && overlayMode_ == OverlayMode::None &&
                 !timelineDragging_ && !IsCursorOverControls() &&
                 GetTickCount64() - lastInteraction_ >= kControlsHideDelayMs)
                 ShowControls(false);
+            if (!ControlsAnimationActive()) UpdateActiveTimer();
         }
         return 0;
     case WM_COMMAND: {

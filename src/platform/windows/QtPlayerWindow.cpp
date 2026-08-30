@@ -801,6 +801,9 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 10:
             *result = videoSurface_->HasRenderedFrame() ? 1 : 0;
             return true;
+        case 11:
+            *result = qRound(controlsOpacity_->opacity() * 1000.0);
+            return true;
         default:
             break;
         }
@@ -1571,21 +1574,28 @@ void QtPlayerWindow::RecordInteraction() {
 
 void QtPlayerWindow::ShowControls(bool show, bool animated) {
     if (!mediaLoaded_ || (!show && (overlayMode_ != OverlayMode::None || sourceSelection_))) return;
-    if (controlsVisible_ == show && controls_->isVisible() == show) return;
+    if (!animated || backgroundTest_) {
+        controlsAnimation_->stop();
+        controlsVisible_ = show;
+        controlsOpacity_->setOpacity(show ? 1.0 : 0.0);
+        controls_->setVisible(show);
+        if (show) controls_->raise();
+        return;
+    }
+    const qreal targetOpacity = show ? 1.0 : 0.0;
+    const bool stateAlreadyMatches = controlsVisible_ == show && controls_->isVisible() == show;
+    if (stateAlreadyMatches &&
+        (controlsAnimation_->state() == QAbstractAnimation::Running ||
+         qAbs(controlsOpacity_->opacity() - targetOpacity) < 0.001)) return;
     controlsVisible_ = show;
     controlsAnimation_->stop();
     if (show) {
         controls_->show();
         controls_->raise();
     }
-    if (!animated || backgroundTest_) {
-        controlsOpacity_->setOpacity(show ? 1.0 : 0.0);
-        controls_->setVisible(show);
-        return;
-    }
     controlsAnimation_->setDuration(show ? 140 : 105);
     controlsAnimation_->setStartValue(controlsOpacity_->opacity());
-    controlsAnimation_->setEndValue(show ? 1.0 : 0.0);
+    controlsAnimation_->setEndValue(targetOpacity);
     controlsAnimation_->start();
 }
 

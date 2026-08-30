@@ -94,6 +94,7 @@ try {
     if (-not $SkipInteractions) {
         Invoke-UiAction $window 3
         if ((Get-UiValue $window 6) -ne 1) { throw 'Playback controls did not appear' }
+        if ((Get-UiValue $window 11) -ne 1000) { throw 'Playback controls appeared with incomplete opacity' }
         if ($CapturePath) {
             Add-Type -AssemblyName System.Drawing
             $rectangle = [WannaViewerQtPlaybackSmokeNative+RECT]::new()
@@ -119,8 +120,10 @@ try {
         }
         Invoke-UiAction $window 4
         if ((Get-UiValue $window 6) -ne 0) { throw 'Playback controls did not hide cleanly' }
+        if ((Get-UiValue $window 11) -ne 0) { throw 'Hidden playback controls retained opacity' }
         Invoke-UiAction $window 3
         if ((Get-UiValue $window 6) -ne 1) { throw 'Playback controls did not reappear cleanly' }
+        if ((Get-UiValue $window 11) -ne 1000) { throw 'Playback controls reappeared with incomplete opacity' }
 
         Invoke-UiAction $window 6
         if ((Get-UiValue $window 7) -lt 4900 -or (Get-UiValue $window 7) -gt 5100) {

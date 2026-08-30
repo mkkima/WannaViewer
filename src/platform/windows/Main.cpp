@@ -26,6 +26,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
+    bool backgroundTest = false;
     try {
         auto paths = wannaviewer::AppPaths::Discover();
         paths.EnsureWritableDirectories();
@@ -35,6 +36,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         std::vector<std::string> commandLine;
         for (int index = 1; arguments && index < argumentCount; ++index) commandLine.push_back(WideToUtf8(arguments[index]));
         if (arguments) LocalFree(arguments);
+        backgroundTest = std::erase(commandLine, "--background-ui-test") != 0;
         bool benchmark = !commandLine.empty() && commandLine.front() == "--benchmark";
         std::string benchmarkMode = "hardware";
         std::string input;
@@ -56,7 +58,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         logger.Write(wannaviewer::LogLevel::Info, "application", "WannaViewer starting");
 
         wannaviewer::PlayerWindow window(std::move(paths), std::move(config), logger);
-        window.Create(instance, showCommand);
+        window.Create(instance, showCommand, backgroundTest);
         if (benchmark) window.EnableBenchmark(std::move(input), std::move(benchmarkMode));
         else if (!input.empty()) window.OpenInitial(std::move(input));
         return window.Run();
@@ -68,7 +70,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             (void)MultiByteToWideChar(CP_UTF8, 0, detail.data(), static_cast<int>(detail.size()), value.data(), count);
             return value;
         }();
-        MessageBoxW(nullptr, wide.c_str(), L"WannaViewer", MB_OK | MB_ICONERROR);
+        if (!backgroundTest) MessageBoxW(nullptr, wide.c_str(), L"WannaViewer", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

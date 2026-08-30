@@ -219,6 +219,87 @@ std::optional<RECT> RelativeControlRectangle(HWND control, HWND surface, int gro
     return rectangle;
 }
 
+struct WindowPlacement final {
+    HWND control{nullptr};
+    ui::Rect rectangle;
+};
+
+struct PendingWindowPlacement final {
+    HWND control{nullptr};
+    int x{0};
+    int y{0};
+    int width{0};
+    int height{0};
+    UINT flags{0};
+};
+
+constexpr std::size_t kMaxWindowPlacements = 64;
+
+void ApplyWindowLayout(HWND parent,
+                       const std::array<WindowPlacement, kMaxWindowPlacements>& placements,
+                       std::size_t placementCount) {
+    std::array<PendingWindowPlacement, kMaxWindowPlacements> pending{};
+    std::size_t pendingCount = 0;
+    for (std::size_t index = 0; index < placementCount; ++index) {
+        const auto& placement = placements[index];
+        if (!placement.control) continue;
+        const bool currentlyVisible =
+            (GetWindowLongPtrW(placement.control, GWL_STYLE) & WS_VISIBLE) != 0;
+        if (!placement.rectangle.visible) {
+            if (currentlyVisible) {
+                pending[pendingCount++] = {placement.control, 0, 0, 0, 0,
+                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER |
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW};
+            }
+            continue;
+        }
+
+        RECT current{};
+        const bool hasRectangle = GetWindowRect(placement.control, &current) != FALSE;
+        if (hasRectangle)
+            MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<POINT*>(&current), 2);
+        const bool geometryChanged = !hasRectangle ||
+            current.left != placement.rectangle.x || current.top != placement.rectangle.y ||
+            current.right - current.left != placement.rectangle.width ||
+            current.bottom - current.top != placement.rectangle.height;
+        if (!geometryChanged && currentlyVisible) continue;
+
+        UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
+        if (!geometryChanged)
+            flags |= SWP_NOMOVE | SWP_NOSIZE;
+        else
+            flags |= SWP_NOCOPYBITS;
+        if (!currentlyVisible) flags |= SWP_SHOWWINDOW;
+        pending[pendingCount++] = {placement.control, placement.rectangle.x, placement.rectangle.y,
+                                   placement.rectangle.width, placement.rectangle.height, flags};
+    }
+    if (pendingCount == 0) return;
+
+    const auto applyIndividually = [&pending, pendingCount] {
+        for (std::size_t index = 0; index < pendingCount; ++index) {
+            const auto& placement = pending[index];
+            SetWindowPos(placement.control, nullptr, placement.x, placement.y,
+                         placement.width, placement.height, placement.flags);
+        }
+    };
+    HDWP deferred = BeginDeferWindowPos(static_cast<int>(pendingCount));
+    if (!deferred) {
+        applyIndividually();
+        return;
+    }
+    for (std::size_t index = 0; index < pendingCount; ++index) {
+        const auto& placement = pending[index];
+        deferred = DeferWindowPos(deferred, placement.control, nullptr,
+                                  placement.x, placement.y, placement.width, placement.height,
+                                  placement.flags);
+        if (!deferred) {
+            applyIndividually();
+            return;
+        }
+    }
+    if (!EndDeferWindowPos(deferred)) applyIndividually();
+}
+
 std::wstring Utf8ToWide(std::string_view value) {
     if (value.empty()) return {};
     const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
@@ -294,6 +375,7 @@ LRESULT CALLBACK InteractionSubclass(HWND window, UINT message, WPARAM wParam, L
                                      UINT_PTR, DWORD_PTR reference) {
     const HWND owner = reinterpret_cast<HWND>(reference);
     const bool timeline = GetDlgCtrlID(window) == kTimeline;
+    if (message == WM_ERASEBKGND) return 1;
     if (message == WM_MOUSEMOVE) {
         if (!GetPropW(window, kHoverProperty)) {
             (void)SetPropW(window, kHoverProperty,
@@ -433,7 +515,7 @@ PlayerWindow::~PlayerWindow() {
     }
 }
 
-void PlayerWindow::Create(HINSTANCE instance, int showCommand) {
+void PlayerWindow::Create(HINSTANCE instance, int showCommand, bool backgroundTest) {
     instance_ = instance;
     Gdiplus::GdiplusStartupInput graphicsStartup;
     if (Gdiplus::GdiplusStartup(&gdiplusToken_, &graphicsStartup, nullptr) != Gdiplus::Ok)
@@ -452,7 +534,8 @@ void PlayerWindow::Create(HINSTANCE instance, int showCommand) {
     type.hIconSm = type.hIcon;
     if (!RegisterClassExW(&type) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
         throw std::runtime_error("Unable to register the player window class");
-    window_ = CreateWindowExW(0, type.lpszClassName, L"WannaViewer", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    const DWORD extendedStyle = backgroundTest ? WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE : 0;
+    window_ = CreateWindowExW(extendedStyle, type.lpszClassName, L"WannaViewer", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                               CW_USEDEFAULT, CW_USEDEFAULT, 1280, 760, nullptr, nullptr, instance, this);
     if (!window_) throw std::runtime_error("Unable to create the player window");
     dpi_ = GetDpiForWindow(window_);
@@ -463,7 +546,15 @@ void PlayerWindow::Create(HINSTANCE instance, int showCommand) {
     CreateControls();
     DragAcceptFiles(window_, TRUE);
     LogHardwareInformation();
-    ShowWindow(window_, showCommand);
+    if (backgroundTest) {
+        const int offscreenX = GetSystemMetrics(SM_XVIRTUALSCREEN) +
+                               GetSystemMetrics(SM_CXVIRTUALSCREEN) + 1024;
+        const int offscreenY = GetSystemMetrics(SM_YVIRTUALSCREEN) +
+                               GetSystemMetrics(SM_CYVIRTUALSCREEN) + 1024;
+        SetWindowPos(window_, nullptr, offscreenX, offscreenY, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    }
+    ShowWindow(window_, backgroundTest ? SW_SHOWNOACTIVATE : showCommand);
     UpdateWindow(window_);
     RecordInteraction();
 }
@@ -587,8 +678,10 @@ void PlayerWindow::CreateControls() {
     overlaySecondaryButton_ = createButton(kOverlaySecondary, L"Cancel");
     for (HWND control : {playButton_, rewindButton_, forwardButton_, muteButton_, timeline_, volume_, audio_, subtitles_, videoQuality_, shader_,
                          statsButton_, fullscreenButton_, settingsButton_, openFileButton_, openUrlButton_,
-                         sourceOpenButton_, sourceCancelButton_, overlayPrimaryButton_, overlaySecondaryButton_})
+                         sourceOpenButton_, sourceCancelButton_, overlayPrimaryButton_, overlaySecondaryButton_}) {
+        (void)SetWindowTheme(control, L"", L"");
         SetWindowSubclass(control, InteractionSubclass, 2, reinterpret_cast<DWORD_PTR>(window_));
+    }
     for (HWND control : {sourceSeasonList_, sourceVoiceList_, sourceEpisodeList_, sourceStreamList_})
         SetWindowSubclass(control, SourceSelectorSubclass, 3, reinterpret_cast<DWORD_PTR>(window_));
     for (HWND control : {sourceOpenButton_, sourceCancelButton_})
@@ -628,6 +721,8 @@ void PlayerWindow::CreateControls() {
     EnableWindow(shader_, FALSE);
     EnableWindow(statsButton_, FALSE);
     EnableWindow(sourceOpenButton_, FALSE);
+    SetWindowPos(video_, HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     LayoutControls();
 }
 
@@ -710,10 +805,11 @@ void PlayerWindow::LayoutControls() {
                                (controlsVisible_ || controlsAnimationProgress_ > 0.0);
     const auto layout = ui::ComputeControlLayout(width, height, dpi_, chromeVisible);
     compactLayout_ = layout.compact;
-    const auto place = [](HWND control, const ui::Rect& rectangle) {
-        if (!control) return;
-        MoveWindow(control, rectangle.x, rectangle.y, rectangle.width, rectangle.height, TRUE);
-        ShowWindow(control, rectangle.visible ? SW_SHOWNA : SW_HIDE);
+    std::array<WindowPlacement, kMaxWindowPlacements> placements{};
+    std::size_t placementCount = 0;
+    const auto place = [&placements, &placementCount](HWND control, ui::Rect rectangle) {
+        if (placementCount < placements.size())
+            placements[placementCount++] = {control, rectangle};
     };
     const auto inset = [](ui::Rect rectangle, int amount) {
         if (rectangle.width <= amount * 2 || rectangle.height <= amount * 2) return rectangle;
@@ -749,19 +845,21 @@ void PlayerWindow::LayoutControls() {
     place(settingsButton_, animated(layout.settings));
 
     const bool showEmpty = !mediaLoaded_ && !mediaOpening_ && !benchmarkMode_ && !selectorVisible && !overlayVisible;
-    MoveWindow(emptyState_, layout.emptyState.x, layout.emptyState.y, layout.emptyState.width, layout.emptyState.height, TRUE);
-    MoveWindow(openFileButton_, layout.openFile.x, layout.openFile.y, layout.openFile.width, layout.openFile.height, TRUE);
-    MoveWindow(openUrlButton_, layout.openUrl.x, layout.openUrl.y, layout.openUrl.width, layout.openUrl.height, TRUE);
-    ShowWindow(emptyState_, showEmpty ? SW_SHOWNA : SW_HIDE);
-    ShowWindow(openFileButton_, showEmpty ? SW_SHOWNA : SW_HIDE);
-    ShowWindow(openUrlButton_, showEmpty ? SW_SHOWNA : SW_HIDE);
+    auto emptyState = layout.emptyState;
+    auto openFile = layout.openFile;
+    auto openUrl = layout.openUrl;
+    emptyState.visible = openFile.visible = openUrl.visible = showEmpty;
+    place(emptyState_, emptyState);
+    place(openFileButton_, openFile);
+    place(openUrlButton_, openUrl);
 
     const auto selector = ui::ComputeSourceSelectorLayout(width, layout.bar.visible ? layout.bar.y : height,
                                                            dpi_, selectorVisible);
     if (selectorVisible) {
         const auto rowHeight = static_cast<WPARAM>(Scale(selector.compact ? 30 : 34));
         for (HWND list : {sourceSeasonList_, sourceVoiceList_, sourceEpisodeList_, sourceStreamList_})
-            SendMessageW(list, LB_SETITEMHEIGHT, 0, rowHeight);
+            if (SendMessageW(list, LB_GETITEMHEIGHT, 0, 0) != static_cast<LRESULT>(rowHeight))
+                SendMessageW(list, LB_SETITEMHEIGHT, 0, rowHeight);
     }
     place(sourcePanel_, selector.panel);
     place(sourceTitle_, selector.title);
@@ -782,7 +880,9 @@ void PlayerWindow::LayoutControls() {
         : overlayMode_ == OverlayMode::Url ? ui::OverlayContent::Input : ui::OverlayContent::Message;
     const auto overlay = ui::ComputeOverlayLayout(width, height, dpi_, overlayVisible, overlayContent);
     if (overlayMode_ == OverlayMode::Choice)
-        SendMessageW(overlayList_, LB_SETITEMHEIGHT, 0, static_cast<LPARAM>(Scale(38)));
+        if (const auto rowHeight = static_cast<LPARAM>(Scale(38));
+            SendMessageW(overlayList_, LB_GETITEMHEIGHT, 0, 0) != rowHeight)
+            SendMessageW(overlayList_, LB_SETITEMHEIGHT, 0, rowHeight);
     place(overlayPanel_, overlay.panel);
     place(overlayTitle_, overlay.title);
     place(overlayBody_, overlay.body);
@@ -791,28 +891,18 @@ void PlayerWindow::LayoutControls() {
     place(overlayPrimaryButton_, overlay.primary);
     place(overlaySecondaryButton_, overlay.secondary);
 
-    const ui::Rect statisticsRect{Scale(16), Scale(16), std::max(0, std::min(Scale(560), width - Scale(32))),
-                                  std::max(0, std::min(Scale(290), layout.video.height - Scale(32))),
-                                  statisticsVisible_ && !selectorVisible && !overlayVisible};
-    MoveWindow(stats_, statisticsRect.x, statisticsRect.y, statisticsRect.width, statisticsRect.height, TRUE);
-    ShowWindow(stats_, statisticsRect.visible ? SW_SHOWNA : SW_HIDE);
-
-    SetWindowPos(video_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    for (HWND control : {controlsBar_, emptyState_, openFileButton_, openUrlButton_, playButton_, rewindButton_,
-                         forwardButton_, muteButton_, timeline_,
-                         timeLabel_, volume_, audio_, subtitles_, videoQuality_, shader_, statsButton_, fullscreenButton_,
-                         settingsButton_, stats_, sourcePanel_, sourceTitle_, sourceSubtitle_, sourceSeasonLabel_,
-                         sourceVoiceLabel_, sourceEpisodeLabel_, sourceStreamLabel_, sourceSeasonList_, sourceVoiceList_,
-                         sourceEpisodeList_, sourceStreamList_, sourceStatus_, sourceOpenButton_, sourceCancelButton_,
-                         overlayPanel_, overlayTitle_, overlayBody_, overlayEdit_, overlayList_, overlayPrimaryButton_,
-                         overlaySecondaryButton_})
-        if (IsWindowVisible(control)) SetWindowPos(control, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    InvalidateRect(window_, nullptr, FALSE);
+    place(stats_, {Scale(16), Scale(16), std::max(0, std::min(Scale(560), width - Scale(32))),
+                   std::max(0, std::min(Scale(290), layout.video.height - Scale(32))),
+                   statisticsVisible_ && !selectorVisible && !overlayVisible});
+    ApplyWindowLayout(window_, placements, placementCount);
 }
 
 void PlayerWindow::SetMediaLoaded(bool loaded) {
     mediaLoaded_ = loaded;
     mediaOpening_ = false;
+    displayedTimelinePosition_ = -1;
+    displayedPlaying_.reset();
+    displayedTimeLabel_.clear();
     EnableWindow(playButton_, loaded);
     EnableWindow(rewindButton_, loaded);
     EnableWindow(forwardButton_, loaded);
@@ -911,12 +1001,17 @@ void PlayerWindow::UpdateTimelineFromValue(int value, bool commit) {
         return;
     }
 
-    SendMessageW(timeline_, TBM_SETPOS, TRUE, value);
+    if (displayedTimelinePosition_ != value) {
+        displayedTimelinePosition_ = value;
+        SendMessageW(timeline_, TBM_SETPOS, TRUE, value);
+    }
     const double ratio = static_cast<double>(value - minimum) / static_cast<double>(maximum - minimum);
     timelinePreviewSeconds_ = duration * ratio;
     const auto label = TimeText(timelinePreviewSeconds_) + L"  /  " + TimeText(duration);
-    SetWindowTextW(timeLabel_, label.c_str());
-    InvalidateRect(timeline_, nullptr, FALSE);
+    if (displayedTimeLabel_ != label) {
+        displayedTimeLabel_ = label;
+        SetWindowTextW(timeLabel_, displayedTimeLabel_.c_str());
+    }
 
     timelineDragging_ = !commit;
     const ULONGLONG now = GetTickCount64();
@@ -938,9 +1033,9 @@ void PlayerWindow::CancelTimelineDrag() {
 }
 
 void PlayerWindow::SetTimelineAnimationTarget(bool active, ULONGLONG now) {
-    UpdateTimelineAnimation(now);
     const double target = active ? 1.0 : 0.0;
     if (timelineAnimationTarget_ == target) return;
+    UpdateTimelineAnimation(now);
     timelineAnimationFrom_ = timelineAnimationProgress_;
     timelineAnimationTarget_ = target;
     timelineAnimationStarted_ = now;
@@ -1041,14 +1136,21 @@ void PlayerWindow::UpdateUi() {
         const int trackPosition = duration > 0.0
             ? static_cast<int>(std::lround(std::clamp(displayPosition / duration, 0.0, 1.0) * 10000.0))
             : 0;
-        SendMessageW(timeline_, TBM_SETPOS, TRUE, trackPosition);
+        if (displayedTimelinePosition_ != trackPosition) {
+            displayedTimelinePosition_ = trackPosition;
+            SendMessageW(timeline_, TBM_SETPOS, TRUE, trackPosition);
+        }
         const auto label = TimeText(displayPosition) + L"  /  " + TimeText(duration);
-        SetWindowTextW(timeLabel_, label.c_str());
-        const wchar_t* playText = !mediaLoaded_ || engine_.IsPaused() ? L"Play" : L"Pause";
-        SetWindowTextW(playButton_, playText);
-        InvalidateRect(playButton_, nullptr, FALSE);
-        InvalidateRect(timeline_, nullptr, FALSE);
-        InvalidateRect(volume_, nullptr, FALSE);
+        if (displayedTimeLabel_ != label) {
+            displayedTimeLabel_ = label;
+            SetWindowTextW(timeLabel_, displayedTimeLabel_.c_str());
+        }
+        const bool playing = mediaLoaded_ && !engine_.IsPaused();
+        if (!displayedPlaying_ || *displayedPlaying_ != playing) {
+            displayedPlaying_ = playing;
+            SetWindowTextW(playButton_, playing ? L"Pause" : L"Play");
+            InvalidateRect(playButton_, nullptr, FALSE);
+        }
     }
     if (statisticsVisible_ && (lastStatisticsUpdate_ == std::chrono::steady_clock::time_point{} ||
         steadyNow - lastStatisticsUpdate_ >= std::chrono::milliseconds(500))) {
@@ -2117,11 +2219,16 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         else
             RecordInteraction();
         return 0;
-    case kTimelineHoverMessage:
-        timelineHovering_ = wParam != FALSE;
-        if (timelineHovering_) timelineHoverX_ = static_cast<int>(lParam);
+    case kTimelineHoverMessage: {
+        const bool hovering = wParam != FALSE;
+        const int hoverX = hovering ? static_cast<int>(lParam) : timelineHoverX_;
+        const bool hoverPositionChanged = hovering && hoverX != timelineHoverX_;
+        timelineHovering_ = hovering;
+        timelineHoverX_ = hoverX;
         SetTimelineAnimationTarget(timelineHovering_ || timelineDragging_, GetTickCount64());
+        if (hoverPositionChanged) InvalidateRect(timeline_, nullptr, FALSE);
         return 0;
+    }
     case kTimelineSeekMessage:
         switch (static_cast<TimelineInput>(wParam)) {
         case TimelineInput::Begin:

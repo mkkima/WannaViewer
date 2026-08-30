@@ -2,6 +2,7 @@
 param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
     [switch]$VerifyYummyPlayback,
+    [switch]$Interactive,
     [string]$CapturePath,
     [string[]]$Urls = @(
         'https://ru.yummyani.me/catalog/item/angel-po-sosedstvu-2',
@@ -11,6 +12,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $Player)) { throw "Player not found: $Player" }
+if (-not $Interactive -and ($VerifyYummyPlayback -or $CapturePath)) {
+    throw 'Playback pointer checks and screen capture require the explicit -Interactive switch'
+}
 
 Add-Type -TypeDefinition @'
 using System;
@@ -134,9 +138,10 @@ function Get-AllSourceLabels([IntPtr]$Window) {
 $playerPath = (Resolve-Path -LiteralPath $Player).Path
 foreach ($url in $Urls) {
     $cursorBefore = [WannaViewerUrlSmokeNative+POINT]::new()
-    [void][WannaViewerUrlSmokeNative]::GetCursorPos([ref]$cursorBefore)
+    if ($Interactive) { [void][WannaViewerUrlSmokeNative]::GetCursorPos([ref]$cursorBefore) }
     $start = [Diagnostics.ProcessStartInfo]::new($playerPath)
     $start.UseShellExecute = $false
+    if (-not $Interactive) { $start.ArgumentList.Add('--background-ui-test') }
     $start.ArgumentList.Add($url)
     $process = [Diagnostics.Process]::Start($start)
     try {
@@ -148,7 +153,7 @@ foreach ($url in $Urls) {
         do {
             Start-Sleep -Milliseconds 100
             $process.Refresh()
-            $window = $process.MainWindowHandle
+            $window = Find-ProcessWindow $process.Id 'WannaViewer.PlayerWindow'
             if ((Find-ProcessWindow $process.Id '#32770') -ne [IntPtr]::Zero) {
                 throw "Resolver showed an error dialog for $url"
             }
@@ -425,7 +430,7 @@ foreach ($url in $Urls) {
         if (-not $process.WaitForExit(10000)) { throw 'Player did not close cleanly' }
         if ($process.ExitCode -ne 0) { throw "Player exited with code $($process.ExitCode)" }
     } finally {
-        [void][WannaViewerUrlSmokeNative]::SetCursorPos($cursorBefore.X, $cursorBefore.Y)
+        if ($Interactive) { [void][WannaViewerUrlSmokeNative]::SetCursorPos($cursorBefore.X, $cursorBefore.Y) }
         if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }
 }

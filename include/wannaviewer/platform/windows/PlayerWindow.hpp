@@ -31,7 +31,7 @@ public:
     PlayerWindow(const PlayerWindow&) = delete;
     PlayerWindow& operator=(const PlayerWindow&) = delete;
 
-    void Create(HINSTANCE instance, int showCommand);
+    void Create(HINSTANCE instance, int showCommand, bool backgroundTest = false);
     int Run();
     void OpenInitial(std::string value);
     void EnableBenchmark(std::string value, std::string mode);
@@ -201,6 +201,9 @@ private:
     double timelineAnimationTarget_{0.0};
     double timelinePreviewSeconds_{0.0};
     UINT uiTimerInterval_{0};
+    int displayedTimelinePosition_{-1};
+    std::optional<bool> displayedPlaying_;
+    std::wstring displayedTimeLabel_;
     unsigned dpi_{96};
     std::size_t shaderPresetIndex_{0};
     int audioSelection_{-1};

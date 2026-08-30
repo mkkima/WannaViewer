@@ -17,6 +17,8 @@ public static class WannaViewerEmptySmokeNative {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window, StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out RECT rectangle);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr window, IntPtr region);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
@@ -59,6 +61,7 @@ function Assert-NoBinaryRegion([IntPtr]$Window, [string]$Label) {
 
 $start = [Diagnostics.ProcessStartInfo]::new((Resolve-Path -LiteralPath $Player).Path)
 $start.UseShellExecute = $false
+$start.ArgumentList.Add('--background-ui-test')
 $process = [Diagnostics.Process]::Start($start)
 try {
     [void]$process.WaitForInputIdle(10000)
@@ -66,12 +69,23 @@ try {
     do {
         Start-Sleep -Milliseconds 50
         $process.Refresh()
-        $main = $process.MainWindowHandle
+        $main = Find-ProcessWindow $process.Id 'WannaViewer.PlayerWindow'
     } while ($main -eq [IntPtr]::Zero -and -not $process.HasExited -and
              [DateTime]::UtcNow -lt $startupDeadline)
     if ($process.HasExited -or $main -eq [IntPtr]::Zero) { throw 'Player window did not start' }
     $mainRect = [WannaViewerEmptySmokeNative+RECT]::new()
     [void][WannaViewerEmptySmokeNative]::GetWindowRect($main, [ref]$mainRect)
+    $virtualLeft = [WannaViewerEmptySmokeNative]::GetSystemMetrics(76)
+    $virtualTop = [WannaViewerEmptySmokeNative]::GetSystemMetrics(77)
+    $virtualRight = $virtualLeft + [WannaViewerEmptySmokeNative]::GetSystemMetrics(78)
+    $virtualBottom = $virtualTop + [WannaViewerEmptySmokeNative]::GetSystemMetrics(79)
+    if ($mainRect.Left -lt $virtualRight -and $mainRect.Right -gt $virtualLeft -and
+        $mainRect.Top -lt $virtualBottom -and $mainRect.Bottom -gt $virtualTop) {
+        throw 'Background UI smoke window intersects the visible virtual desktop'
+    }
+    if ([WannaViewerEmptySmokeNative]::GetForegroundWindow() -eq $main) {
+        throw 'Background UI smoke window stole foreground focus'
+    }
     $controls = @{}
     $childCallback = [WannaViewerEmptySmokeNative+EnumProcedure] {
         param($window, $data)
@@ -125,4 +139,4 @@ try {
     if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
 }
 
-Write-Host 'Smooth empty-state UI smoke passed: binary control masks are absent and URL entry stays inside the player.'
+Write-Host 'Background empty-state UI smoke passed without stealing the screen, taskbar, cursor, or focus.'

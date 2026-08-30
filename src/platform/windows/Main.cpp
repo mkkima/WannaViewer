@@ -17,6 +17,14 @@
 
 int main(int argumentCount, char** arguments) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // Qt 6.8's Windows plugin caches WinRT factories whose vtables live in
+    // Windows.UI.dll, then clears them from QWindowsContext's destructor. Some
+    // media/COM shutdown paths can release the last normal loader reference
+    // first, leaving Qt with a pointer into an unloaded module. Retain the
+    // system DLL until process teardown so QApplication can clear its cache
+    // while the factory code is still mapped.
+    [[maybe_unused]] const HMODULE windowsUiLifetime =
+        LoadLibraryExW(L"Windows.UI.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QSurfaceFormat videoFormat;
     videoFormat.setRenderableType(QSurfaceFormat::OpenGL);

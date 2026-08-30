@@ -219,6 +219,8 @@ private:
     bool controlsVisible_{true};
     bool statisticsVisible_{false};
     bool timelineDragging_{false};
+    std::optional<int> pendingTimelineValue_;
+    std::chrono::steady_clock::time_point pendingTimelineStarted_{};
     bool fullscreen_{false};
     bool backgroundTest_{false};
     bool benchmarkMode_{false};

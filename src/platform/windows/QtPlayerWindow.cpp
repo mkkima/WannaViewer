@@ -10,6 +10,7 @@
 #include "wannaviewer/resolvers/DirectMediaResolver.hpp"
 #include "wannaviewer/resolvers/GenericResolver.hpp"
 #include "wannaviewer/resolvers/YummyAnimeResolver.hpp"
+#include "wannaviewer/ui/ControlLayout.hpp"
 
 #include <QAbstractAnimation>
 #include <QApplication>
@@ -42,7 +43,6 @@
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSlider>
-#include <QStyle>
 #include <QTimer>
 #include <QUrl>
 
@@ -190,15 +190,52 @@ QIcon MakeIcon(Glyph glyph, QColor color = QColor(244, 244, 246)) {
     return QIcon(pixmap);
 }
 
-class SeekSlider final : public QSlider {
+class PolishedSlider final : public QSlider {
 public:
-    explicit SeekSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {}
+    explicit PolishedSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {
+        setMouseTracking(true);
+        setCursor(Qt::PointingHandCursor);
+    }
 
 protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+
+        const qreal channelLeft = kHandleRadius + 1.0;
+        const qreal channelRight = std::max(channelLeft, static_cast<qreal>(width()) - channelLeft);
+        const qreal channelWidth = channelRight - channelLeft;
+        const qreal centerY = static_cast<qreal>(height()) / 2.0;
+        const QRectF channel(channelLeft, centerY - kTrackHeight / 2.0, channelWidth, kTrackHeight);
+        const qreal fraction = maximum() > minimum()
+            ? std::clamp(static_cast<qreal>(sliderPosition() - minimum()) /
+                             static_cast<qreal>(maximum() - minimum()),
+                         0.0, 1.0)
+            : 0.0;
+        const qreal handleX = channelLeft + channelWidth * fraction;
+
+        painter.setBrush(isEnabled() ? QColor(QStringLiteral("#303036"))
+                                     : QColor(QStringLiteral("#242428")));
+        painter.drawRoundedRect(channel, kTrackHeight / 2.0, kTrackHeight / 2.0);
+        if (handleX > channelLeft) {
+            const QRectF progress(channelLeft, channel.top(), handleX - channelLeft, channel.height());
+            painter.setBrush(isEnabled() ? QColor(QStringLiteral("#f1f1f3"))
+                                         : QColor(QStringLiteral("#66666c")));
+            painter.drawRoundedRect(progress, kTrackHeight / 2.0, kTrackHeight / 2.0);
+        }
+
+        const qreal radius = isEnabled() && (underMouse() || isSliderDown())
+            ? kHoveredHandleRadius : kHandleRadius;
+        painter.setPen(QPen(QColor(QStringLiteral("#111114")), 1.0));
+        painter.setBrush(isEnabled() ? QColor(QStringLiteral("#ffffff"))
+                                     : QColor(QStringLiteral("#77777e")));
+        painter.drawEllipse(QPointF(handleX, centerY), radius, radius);
+    }
+
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) { QSlider::mousePressEvent(event); return; }
         setSliderDown(true);
-        emit sliderPressed();
         SetFromMouse(event->position().x());
         event->accept();
     }
@@ -211,15 +248,19 @@ protected:
         if (event->button() != Qt::LeftButton || !isSliderDown()) { QSlider::mouseReleaseEvent(event); return; }
         SetFromMouse(event->position().x());
         setSliderDown(false);
-        emit sliderReleased();
         event->accept();
     }
 
 private:
+    static constexpr qreal kTrackHeight = 4.0;
+    static constexpr qreal kHandleRadius = 6.0;
+    static constexpr qreal kHoveredHandleRadius = 7.0;
+
     void SetFromMouse(qreal x) {
-        const int sliderValue = QStyle::sliderValueFromPosition(
-            minimum(), maximum(), static_cast<int>(std::lround(std::clamp(x, 0.0, static_cast<double>(width())))),
-            std::max(1, width()));
+        const int channelLeft = static_cast<int>(kHandleRadius + 1.0);
+        const int channelRight = std::max(channelLeft, width() - channelLeft);
+        const int sliderValue = ui::TimelineValueFromPoint(
+            static_cast<int>(std::lround(x)), channelLeft, channelRight, minimum(), maximum());
         setValue(sliderValue);
         emit sliderMoved(sliderValue);
     }
@@ -408,7 +449,7 @@ void QtPlayerWindow::BuildUi() {
     auto* controlsLayout = new QVBoxLayout(controls_);
     controlsLayout->setContentsMargins(18, 10, 18, 10);
     controlsLayout->setSpacing(5);
-    timeline_ = new SeekSlider(controls_);
+    timeline_ = new PolishedSlider(controls_);
     timeline_->setObjectName(QStringLiteral("timeline"));
     timeline_->setRange(0, 10000);
     timeline_->setFixedHeight(22);
@@ -421,11 +462,12 @@ void QtPlayerWindow::BuildUi() {
     rewindButton_ = MakeIconButton(controls_, Glyph::Back, QStringLiteral("Back 10 seconds"));
     forwardButton_ = MakeIconButton(controls_, Glyph::Forward, QStringLiteral("Forward 10 seconds"));
     muteButton_ = MakeIconButton(controls_, Glyph::Volume, QStringLiteral("Mute"));
-    volume_ = new QSlider(Qt::Horizontal, controls_);
+    volume_ = new PolishedSlider(controls_);
     volume_->setObjectName(QStringLiteral("volume"));
     volume_->setRange(0, 100);
     volume_->setValue(80);
     volume_->setFixedWidth(86);
+    volume_->setFixedHeight(22);
     timeLabel_ = new QLabel(QStringLiteral("00:00  /  00:00"), controls_);
     timeLabel_->setObjectName(QStringLiteral("timeLabel"));
     timeLabel_->setMinimumWidth(116);
@@ -655,12 +697,6 @@ void QtPlayerWindow::ApplyTheme() {
         QListWidget::item { min-height: 34px; border-radius: 10px; padding: 2px 10px; }
         QListWidget::item:hover { background: #202025; }
         QListWidget::item:selected { background: #303037; }
-        QSlider::groove:horizontal { height: 4px; background: #303036; border-radius: 2px; }
-        QSlider::sub-page:horizontal { background: #f1f1f3; border-radius: 2px; }
-        QSlider::handle:horizontal { width: 12px; margin: -4px 0; background: #ffffff;
-                                     border: none; border-radius: 6px; }
-        QSlider::handle:horizontal:hover { width: 16px; margin: -6px 0; border-radius: 8px; }
-        QSlider:disabled::sub-page:horizontal, QSlider:disabled::handle:horizontal { background: #66666c; }
         QToolTip { color: #f4f4f6; background: #151519; border: 1px solid #3b3b42; border-radius: 8px; padding: 6px; }
     )"));
 }
@@ -1419,6 +1455,7 @@ void QtPlayerWindow::SetMediaLoaded(bool loaded) {
     mediaLoaded_ = loaded;
     mediaOpening_ = false;
     timelineDragging_ = false;
+    pendingTimelineValue_.reset();
     displayedPlaying_.reset();
     const std::array<QWidget*, 11> playbackControls{
         playButton_, rewindButton_, forwardButton_, muteButton_, timeline_, volume_, subtitleButton_,
@@ -1467,11 +1504,25 @@ void QtPlayerWindow::UpdateUi() {
     const double duration = engine_.Duration();
     const double position = engine_.Position();
     if (mediaLoaded_ && controlsVisible_ && !timelineDragging_) {
-        const int value = duration > 0.0
+        int value = duration > 0.0
             ? static_cast<int>(std::lround(std::clamp(position / duration, 0.0, 1.0) * 10000.0)) : 0;
+        double displayedPosition = position;
+        if (pendingTimelineValue_ && duration > 0.0) {
+            const double pendingPosition = duration * static_cast<double>(*pendingTimelineValue_) / 10000.0;
+            const auto pendingAge = steadyNow - pendingTimelineStarted_;
+            const bool minimumHoldActive = pendingAge < std::chrono::milliseconds(250);
+            const bool waitingForMpv = std::abs(position - pendingPosition) > 0.75 &&
+                                       pendingAge < std::chrono::milliseconds(1500);
+            if (minimumHoldActive || waitingForMpv) {
+                value = *pendingTimelineValue_;
+                displayedPosition = pendingPosition;
+            } else {
+                pendingTimelineValue_.reset();
+            }
+        }
         const QSignalBlocker blocker(timeline_);
         timeline_->setValue(value);
-        timeLabel_->setText(TimeText(position) + QStringLiteral("  /  ") + TimeText(duration));
+        timeLabel_->setText(TimeText(displayedPosition) + QStringLiteral("  /  ") + TimeText(duration));
         const bool playing = !engine_.IsPaused();
         if (!displayedPlaying_ || *displayedPlaying_ != playing) {
             displayedPlaying_ = playing;
@@ -1498,12 +1549,16 @@ void QtPlayerWindow::UpdateUi() {
 
 void QtPlayerWindow::SeekFromSlider(bool commit) {
     if (!mediaLoaded_) return;
+    timelineDragging_ = !commit;
     const double duration = engine_.Duration();
     if (duration <= 0.0) return;
     const double seconds = duration * static_cast<double>(timeline_->value()) / 10000.0;
     timeLabel_->setText(TimeText(seconds) + QStringLiteral("  /  ") + TimeText(duration));
-    timelineDragging_ = !commit;
-    if (commit) engine_.SeekAbsolute(seconds);
+    if (commit) {
+        pendingTimelineValue_ = timeline_->value();
+        pendingTimelineStarted_ = std::chrono::steady_clock::now();
+        engine_.SeekAbsolute(seconds);
+    }
     RecordInteraction();
 }
 

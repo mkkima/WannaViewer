@@ -13,15 +13,7 @@ namespace wannaviewer {
 
 MpvApi::~MpvApi() {
 #ifdef _WIN32
-    // libmpv and its Windows media/GPU dependencies can initialize WinRT
-    // factories that are also cached by Qt's Windows platform plugin. If the
-    // DLL is unloaded before QApplication is destroyed, Windows.UI.dll can be
-    // unloaded while qwindows still owns one of those factory pointers; Qt's
-    // final winrt::clear_factory_cache() then dereferences unloaded code. The
-    // mpv handle and render context are still explicitly destroyed by
-    // MpvEngine::Shutdown(). Keep only the library module itself alive until
-    // normal process teardown, when Windows releases it after Qt has gone.
-    module_ = nullptr;
+    if (module_) FreeLibrary(static_cast<HMODULE>(module_));
 #else
     if (module_) dlclose(module_);
 #endif

@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -33,6 +34,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QMouseEvent;
+class QProgressBar;
 class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
@@ -43,10 +45,12 @@ class QTimer;
 namespace wannaviewer {
 
 class MpvVideoWidget;
+class UiTransition;
 
 class QtPlayerWindow final : public QWidget {
 public:
-    QtPlayerWindow(AppPaths paths, Config config, Logger& logger, bool backgroundTest = false);
+    QtPlayerWindow(AppPaths paths, Config config, Logger& logger,
+                   bool backgroundTest = false, bool motionTest = false);
     ~QtPlayerWindow() override;
 
     QtPlayerWindow(const QtPlayerWindow&) = delete;
@@ -80,6 +84,10 @@ private:
     void ApplyTheme();
     void LayoutOverlays();
     void UpdateVisibility();
+    void SetTransitionVisible(UiTransition& transition, bool visible);
+    void StopUiAnimations();
+    void ClearOverlayWidgets();
+    void ClearSourceSelectorWidgets();
     void StartEngineInitialization();
     void HandleEngineInitialized();
     void OpenMedia(std::string value,
@@ -166,7 +174,9 @@ private:
     QFrame* openingState_{nullptr};
     QLabel* openingTitle_{nullptr};
     QLabel* openingStatus_{nullptr};
+    QProgressBar* openingProgress_{nullptr};
 
+    QFrame* modalScrim_{nullptr};
     QFrame* overlay_{nullptr};
     QLabel* overlayTitle_{nullptr};
     QLabel* overlayBody_{nullptr};
@@ -184,6 +194,13 @@ private:
     QComboBox* sourceStream_{nullptr};
     QPushButton* sourceOpen_{nullptr};
     QPushButton* sourceCancel_{nullptr};
+
+    std::unique_ptr<UiTransition> emptyTransition_;
+    std::unique_ptr<UiTransition> openingTransition_;
+    std::unique_ptr<UiTransition> scrimTransition_;
+    std::unique_ptr<UiTransition> overlayTransition_;
+    std::unique_ptr<UiTransition> sourceTransition_;
+    std::unique_ptr<UiTransition> statisticsTransition_;
 
     std::vector<std::int64_t> audioTrackIds_;
     std::vector<std::int64_t> subtitleTrackIds_;
@@ -223,6 +240,8 @@ private:
     std::chrono::steady_clock::time_point pendingTimelineStarted_{};
     bool fullscreen_{false};
     bool backgroundTest_{false};
+    bool motionEnabled_{true};
+    bool motionTest_{false};
     bool benchmarkMode_{false};
     bool benchmarkRunning_{false};
     std::optional<bool> displayedPlaying_;

@@ -26,6 +26,8 @@ Portable configuration/cache/logs are the default. Create the empty marker
 `config/use-user-config` before launch to redirect writable configuration,
 cache, and logs to the normal per-user application-data directory; packaged
 shaders/resolver manifests and tools remain beside the executable.
+Set `ui.animations=false` in `config/player.conf` to disable interface motion;
+the Windows shell also honors the operating-system client-animation setting.
 
 Drop a media file onto the window, use **Ctrl+O**, or pass a file/direct URL on
 the command line. Use **Ctrl+U** for a URL. Controls disappear while playing.

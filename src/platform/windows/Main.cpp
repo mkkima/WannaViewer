@@ -53,9 +53,10 @@ int main(int argumentCount, char** arguments) {
         }
         const bool backgroundUiTest = std::erase(commandLine, "--background-ui-test") != 0;
         const bool backgroundRenderTest = std::erase(commandLine, "--background-render-test") != 0;
-        backgroundTest = backgroundUiTest || backgroundRenderTest;
+        const bool backgroundMotionTest = std::erase(commandLine, "--background-motion-test") != 0;
+        backgroundTest = backgroundUiTest || backgroundRenderTest || backgroundMotionTest;
         if (backgroundRenderTest) config.Set("logging.level", "debug");
-        if (backgroundUiTest) {
+        if (backgroundUiTest || backgroundMotionTest) {
             // Keep layout/input automation completely off-screen and use mpv's
             // null output. The separate render smoke covers the real OpenGL path.
             config.Set("playback.vo", "null");
@@ -83,8 +84,9 @@ int main(int argumentCount, char** arguments) {
                                                               64 * 1024, 64 * 1024 * 1024)), 3);
         logger.Write(wannaviewer::LogLevel::Info, "application", "WannaViewer starting with Qt Widgets UI");
 
-        wannaviewer::QtPlayerWindow window(std::move(paths), std::move(config), logger, backgroundTest);
-        if (backgroundUiTest) {
+        wannaviewer::QtPlayerWindow window(std::move(paths), std::move(config), logger,
+                                           backgroundTest, backgroundMotionTest);
+        if (backgroundUiTest || backgroundMotionTest) {
             QRect virtualDesktop;
             for (const auto* screen : QGuiApplication::screens()) virtualDesktop = virtualDesktop.united(screen->geometry());
             window.move(virtualDesktop.right() + 1024, virtualDesktop.bottom() + 1024);

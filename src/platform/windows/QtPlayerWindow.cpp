@@ -19,6 +19,7 @@
 #include <QComboBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEnterEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -34,9 +35,11 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QOpenGLWidget>
+#include <QParallelAnimationGroup>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPropertyAnimation>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScreen>
@@ -45,6 +48,7 @@
 #include <QSlider>
 #include <QTimer>
 #include <QUrl>
+#include <QVariantAnimation>
 
 #include <algorithm>
 #include <array>
@@ -52,6 +56,7 @@
 #include <cmath>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <fstream>
 #include <ranges>
 
@@ -65,7 +70,9 @@ namespace {
 constexpr int kControlsHeight = 92;
 constexpr int kControlsMargin = 12;
 constexpr int kControlsHideDelayMs = 1100;
-constexpr int kUiIntervalMs = 100;
+constexpr int kUiIntervalMs = 50;
+constexpr int kPanelEnterDurationMs = 190;
+constexpr int kPanelExitDurationMs = 140;
 constexpr UINT kBackgroundTestQueryMessage = WM_APP + 0x250;
 constexpr UINT kBackgroundTestActionMessage = WM_APP + 0x251;
 
@@ -76,6 +83,11 @@ QString ToQString(std::string_view value) {
 std::string ToUtf8(const QString& value) {
     const QByteArray bytes = value.toUtf8();
     return {bytes.constData(), static_cast<std::size_t>(bytes.size())};
+}
+
+bool SystemAnimationsEnabled() noexcept {
+    BOOL enabled = TRUE;
+    return !SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0) || enabled != FALSE;
 }
 
 QString TimeText(double seconds) {
@@ -192,9 +204,15 @@ QIcon MakeIcon(Glyph glyph, QColor color = QColor(244, 244, 246)) {
 
 class PolishedSlider final : public QSlider {
 public:
-    explicit PolishedSlider(QWidget* parent) : QSlider(Qt::Horizontal, parent) {
+    explicit PolishedSlider(QWidget* parent, bool motionEnabled)
+        : QSlider(Qt::Horizontal, parent), motionEnabled_(motionEnabled) {
         setMouseTracking(true);
         setCursor(Qt::PointingHandCursor);
+        handleAnimation_.setEasingCurve(QEasingCurve::OutCubic);
+        connect(&handleAnimation_, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+            handleEmphasis_ = value.toReal();
+            update();
+        });
     }
 
 protected:
@@ -225,17 +243,27 @@ protected:
             painter.drawRoundedRect(progress, kTrackHeight / 2.0, kTrackHeight / 2.0);
         }
 
-        const qreal radius = isEnabled() && (underMouse() || isSliderDown())
-            ? kHoveredHandleRadius : kHandleRadius;
+        const qreal radius = kHandleRadius + (kHoveredHandleRadius - kHandleRadius) * handleEmphasis_;
         painter.setPen(QPen(QColor(QStringLiteral("#111114")), 1.0));
         painter.setBrush(isEnabled() ? QColor(QStringLiteral("#ffffff"))
                                      : QColor(QStringLiteral("#77777e")));
         painter.drawEllipse(QPointF(handleX, centerY), radius, radius);
     }
 
+    void enterEvent(QEnterEvent* event) override {
+        QSlider::enterEvent(event);
+        AnimateHandle(true);
+    }
+
+    void leaveEvent(QEvent* event) override {
+        QSlider::leaveEvent(event);
+        AnimateHandle(isSliderDown());
+    }
+
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) { QSlider::mousePressEvent(event); return; }
         setSliderDown(true);
+        AnimateHandle(true);
         SetFromMouse(event->position().x());
         event->accept();
     }
@@ -248,13 +276,29 @@ protected:
         if (event->button() != Qt::LeftButton || !isSliderDown()) { QSlider::mouseReleaseEvent(event); return; }
         SetFromMouse(event->position().x());
         setSliderDown(false);
+        AnimateHandle(underMouse());
         event->accept();
     }
 
 private:
     static constexpr qreal kTrackHeight = 4.0;
     static constexpr qreal kHandleRadius = 6.0;
-    static constexpr qreal kHoveredHandleRadius = 7.0;
+    static constexpr qreal kHoveredHandleRadius = 8.0;
+
+    void AnimateHandle(bool emphasized) {
+        const qreal target = isEnabled() && emphasized ? 1.0 : 0.0;
+        if (qAbs(handleEmphasis_ - target) < 0.001) return;
+        handleAnimation_.stop();
+        if (!motionEnabled_) {
+            handleEmphasis_ = target;
+            update();
+            return;
+        }
+        handleAnimation_.setDuration(std::max(1, qRound(120.0 * qAbs(handleEmphasis_ - target))));
+        handleAnimation_.setStartValue(handleEmphasis_);
+        handleAnimation_.setEndValue(target);
+        handleAnimation_.start();
+    }
 
     void SetFromMouse(qreal x) {
         const int channelLeft = static_cast<int>(kHandleRadius + 1.0);
@@ -264,6 +308,10 @@ private:
         setValue(sliderValue);
         emit sliderMoved(sliderValue);
     }
+
+    QVariantAnimation handleAnimation_;
+    qreal handleEmphasis_{0.0};
+    bool motionEnabled_{true};
 };
 
 QPushButton* MakeIconButton(QWidget* parent, Glyph glyph, const QString& tooltip) {
@@ -278,6 +326,29 @@ QPushButton* MakeIconButton(QWidget* parent, Glyph glyph, const QString& tooltip
 }
 
 } // namespace
+
+class UiTransition final {
+public:
+    UiTransition(QWidget* target, QObject* owner, int slideOffset, std::function<void()> hiddenCallback = {})
+        : widget(target), effect(new QGraphicsOpacityEffect(target)), group(new QParallelAnimationGroup(owner)),
+          opacity(new QPropertyAnimation(effect, "opacity")), position(new QPropertyAnimation(target, "pos")),
+          offset(slideOffset), onHidden(std::move(hiddenCallback)) {
+        effect->setOpacity(1.0);
+        widget->setGraphicsEffect(effect);
+        group->addAnimation(opacity);
+        group->addAnimation(position);
+    }
+
+    QWidget* widget;
+    QGraphicsOpacityEffect* effect;
+    QParallelAnimationGroup* group;
+    QPropertyAnimation* opacity;
+    QPropertyAnimation* position;
+    QRect restingGeometry;
+    int offset;
+    bool targetVisible{false};
+    std::function<void()> onHidden;
+};
 
 class MpvVideoWidget final : public QOpenGLWidget, protected QOpenGLFunctions {
 public:
@@ -398,11 +469,15 @@ private:
     std::atomic_bool renderedFrame_{false};
 };
 
-QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger, bool backgroundTest)
+QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger,
+                               bool backgroundTest, bool motionTest)
     : paths_(std::move(paths)), config_(std::move(config)), logger_(logger),
       shaders_(paths_.shaders, paths_.presets / "shaders.json"),
       ytDlp_(paths_.tools / "yt-dlp.exe"), resolvers_(&ytDlp_), engine_(paths_, config_, logger_),
-      backgroundTest_(backgroundTest) {
+      backgroundTest_(backgroundTest),
+      motionEnabled_(motionTest ||
+                     (!backgroundTest && config_.GetBool("ui.animations", true) && SystemAnimationsEnabled())),
+      motionTest_(motionTest) {
     shaders_.Reload();
     resolvers_.Add(std::make_unique<DirectMediaResolver>());
     resolvers_.Add(std::make_unique<AnimeGoResolver>());
@@ -449,7 +524,7 @@ void QtPlayerWindow::BuildUi() {
     auto* controlsLayout = new QVBoxLayout(controls_);
     controlsLayout->setContentsMargins(18, 10, 18, 10);
     controlsLayout->setSpacing(5);
-    timeline_ = new PolishedSlider(controls_);
+    timeline_ = new PolishedSlider(controls_, motionEnabled_);
     timeline_->setObjectName(QStringLiteral("timeline"));
     timeline_->setRange(0, 10000);
     timeline_->setFixedHeight(22);
@@ -462,7 +537,7 @@ void QtPlayerWindow::BuildUi() {
     rewindButton_ = MakeIconButton(controls_, Glyph::Back, QStringLiteral("Back 10 seconds"));
     forwardButton_ = MakeIconButton(controls_, Glyph::Forward, QStringLiteral("Forward 10 seconds"));
     muteButton_ = MakeIconButton(controls_, Glyph::Volume, QStringLiteral("Mute"));
-    volume_ = new PolishedSlider(controls_);
+    volume_ = new PolishedSlider(controls_, motionEnabled_);
     volume_->setObjectName(QStringLiteral("volume"));
     volume_->setRange(0, 100);
     volume_->setValue(80);
@@ -531,14 +606,27 @@ void QtPlayerWindow::BuildUi() {
     openingStatus_ = new QLabel(QStringLiteral("Preparing playback…"), openingState_);
     openingStatus_->setObjectName(QStringLiteral("mutedText"));
     openingStatus_->setWordWrap(true);
+    openingProgress_ = new QProgressBar(openingState_);
+    openingProgress_->setObjectName(QStringLiteral("openingProgress"));
+    openingProgress_->setRange(0, 0);
+    openingProgress_->setTextVisible(false);
+    openingProgress_->setFixedHeight(4);
+    openingProgress_->setVisible(motionEnabled_);
     openingLayout->addWidget(openingTitle_);
     openingLayout->addWidget(openingStatus_);
+    openingLayout->addSpacing(2);
+    openingLayout->addWidget(openingProgress_);
 
     statistics_ = new QLabel(this);
     statistics_->setObjectName(QStringLiteral("statistics"));
     statistics_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     statistics_->setWordWrap(false);
     statistics_->hide();
+
+    modalScrim_ = new QFrame(this);
+    modalScrim_->setObjectName(QStringLiteral("modalScrim"));
+    modalScrim_->setFocusPolicy(Qt::NoFocus);
+    modalScrim_->hide();
 
     overlay_ = new QFrame(this);
     overlay_->setObjectName(QStringLiteral("overlayPanel"));
@@ -591,11 +679,37 @@ void QtPlayerWindow::BuildUi() {
     sourceLayout->addStretch(1); sourceLayout->addLayout(sourceButtons);
     sourcePanel_->hide();
 
+    emptyTransition_ = std::make_unique<UiTransition>(emptyState_, this, 10);
+    openingTransition_ = std::make_unique<UiTransition>(openingState_, this, 10);
+    scrimTransition_ = std::make_unique<UiTransition>(modalScrim_, this, 0);
+    overlayTransition_ = std::make_unique<UiTransition>(overlay_, this, 16,
+                                                        [this] { ClearOverlayWidgets(); });
+    sourceTransition_ = std::make_unique<UiTransition>(sourcePanel_, this, 16,
+                                                       [this] { ClearSourceSelectorWidgets(); });
+    statisticsTransition_ = std::make_unique<UiTransition>(statistics_, this, 10);
+    const std::array<UiTransition*, 6> transitions{
+        emptyTransition_.get(), openingTransition_.get(), scrimTransition_.get(),
+        overlayTransition_.get(), sourceTransition_.get(), statisticsTransition_.get()};
+    for (UiTransition* transition : transitions) {
+        connect(transition->group, &QParallelAnimationGroup::finished, this, [transition] {
+            transition->widget->setGeometry(transition->restingGeometry);
+            if (transition->targetVisible) {
+                transition->effect->setOpacity(1.0);
+                transition->widget->show();
+            } else {
+                transition->effect->setOpacity(0.0);
+                transition->widget->hide();
+                if (transition->onHidden) transition->onHidden();
+            }
+        });
+    }
+
     hideTimer_ = new QTimer(this);
     hideTimer_->setSingleShot(true);
     hideTimer_->setInterval(kControlsHideDelayMs);
     uiTimer_ = new QTimer(this);
     uiTimer_->setInterval(kUiIntervalMs);
+    uiTimer_->setTimerType(Qt::PreciseTimer);
     LayoutOverlays();
     UpdateVisibility();
 }
@@ -682,7 +796,10 @@ void QtPlayerWindow::ApplyTheme() {
         QFrame#emptyState, QFrame#openingState, QFrame#overlayPanel, QFrame#sourcePanel {
             background: #0b0b0e; border: 1px solid #36363d; border-radius: 22px;
         }
+        QFrame#modalScrim { background: rgba(0, 0, 0, 176); border: none; }
         QLabel#openingTitle { font-size: 18px; font-weight: 600; }
+        QProgressBar#openingProgress { background: #242429; border: none; border-radius: 2px; }
+        QProgressBar#openingProgress::chunk { background: #ececf0; border-radius: 2px; }
         QLabel#statistics { background: rgba(7, 7, 9, 230); border: 1px solid #34343a;
                             border-radius: 14px; padding: 14px; color: #e8e8ec;
                             font-family: "Cascadia Mono", "Consolas"; font-size: 12px; }
@@ -707,41 +824,134 @@ void QtPlayerWindow::LayoutOverlays() {
     controls_->setGeometry(kControlsMargin, std::max(kControlsMargin, height() - kControlsHeight - kControlsMargin),
                            controlsWidth, kControlsHeight);
     const QSize emptySize(std::min(520, std::max(320, width() - 48)), 252);
-    emptyState_->setGeometry((width() - emptySize.width()) / 2, (height() - emptySize.height()) / 2,
-                             emptySize.width(), emptySize.height());
+    const auto updateTransitionGeometry = [](UiTransition& transition, const QRect& geometry) {
+        transition.restingGeometry = geometry;
+        if (transition.group->state() != QAbstractAnimation::Running) transition.widget->setGeometry(geometry);
+    };
+    updateTransitionGeometry(*emptyTransition_,
+                             QRect((width() - emptySize.width()) / 2, (height() - emptySize.height()) / 2,
+                                   emptySize.width(), emptySize.height()));
     const QSize openingSize(std::min(440, std::max(320, width() - 48)), 112);
-    openingState_->setGeometry((width() - openingSize.width()) / 2, (height() - openingSize.height()) / 2,
-                               openingSize.width(), openingSize.height());
+    updateTransitionGeometry(*openingTransition_,
+                             QRect((width() - openingSize.width()) / 2, (height() - openingSize.height()) / 2,
+                                   openingSize.width(), openingSize.height()));
+    updateTransitionGeometry(*scrimTransition_, rect());
     const int preferredOverlayHeight = overlayMode_ == OverlayMode::Url ? 270 :
                                        overlayMode_ == OverlayMode::Message ? 260 : 540;
     const int preferredOverlayWidth = overlayMode_ == OverlayMode::Choice ? 720 : 660;
     const QSize overlaySize(std::min(preferredOverlayWidth, std::max(420, width() - 64)),
                             std::min(preferredOverlayHeight, std::max(240, height() - 80)));
-    overlay_->setGeometry((width() - overlaySize.width()) / 2, (height() - overlaySize.height()) / 2,
-                          overlaySize.width(), overlaySize.height());
+    updateTransitionGeometry(*overlayTransition_,
+                             QRect((width() - overlaySize.width()) / 2, (height() - overlaySize.height()) / 2,
+                                   overlaySize.width(), overlaySize.height()));
     const QSize sourceSize(std::min(760, std::max(440, width() - 64)),
                            std::min(430, std::max(360, height() - 80)));
-    sourcePanel_->setGeometry((width() - sourceSize.width()) / 2, (height() - sourceSize.height()) / 2,
-                              sourceSize.width(), sourceSize.height());
-    statistics_->setGeometry(18, 18, std::min(560, std::max(320, width() - 36)),
-                             std::min(350, std::max(220, height() - 36)));
+    updateTransitionGeometry(*sourceTransition_,
+                             QRect((width() - sourceSize.width()) / 2, (height() - sourceSize.height()) / 2,
+                                   sourceSize.width(), sourceSize.height()));
+    updateTransitionGeometry(*statisticsTransition_,
+                             QRect(18, 18, std::min(560, std::max(320, width() - 36)),
+                                   std::min(350, std::max(220, height() - 36))));
     videoSurface_->lower();
     if (emptyState_->isVisible()) emptyState_->raise();
     if (openingState_->isVisible()) openingState_->raise();
     if (controls_->isVisible()) controls_->raise();
     if (statistics_->isVisible()) statistics_->raise();
+    if (modalScrim_->isVisible()) modalScrim_->raise();
     if (sourcePanel_->isVisible()) sourcePanel_->raise();
     if (overlay_->isVisible()) overlay_->raise();
 }
 
 void QtPlayerWindow::UpdateVisibility() {
-    emptyState_->setVisible(!mediaLoaded_ && !mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
-    openingState_->setVisible(mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
-    controls_->setVisible(mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
-    sourcePanel_->setVisible(sourceSelection_.has_value());
-    overlay_->setVisible(overlayMode_ != OverlayMode::None);
-    statistics_->setVisible(statisticsVisible_ && mediaLoaded_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
     LayoutOverlays();
+    const bool modalVisible = sourceSelection_.has_value() || overlayMode_ != OverlayMode::None;
+    SetTransitionVisible(*emptyTransition_,
+                         !mediaLoaded_ && !mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    SetTransitionVisible(*openingTransition_, mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    controls_->setVisible(mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    SetTransitionVisible(*statisticsTransition_,
+                         statisticsVisible_ && mediaLoaded_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    SetTransitionVisible(*scrimTransition_, modalVisible);
+    SetTransitionVisible(*sourceTransition_, sourceSelection_.has_value());
+    SetTransitionVisible(*overlayTransition_, overlayMode_ != OverlayMode::None);
+    LayoutOverlays();
+}
+
+void QtPlayerWindow::SetTransitionVisible(UiTransition& transition, bool visible) {
+    const bool settled = transition.group->state() != QAbstractAnimation::Running &&
+                         transition.widget->isVisible() == visible &&
+                         qAbs(transition.effect->opacity() - (visible ? 1.0 : 0.0)) < 0.001;
+    if (transition.targetVisible == visible &&
+        (transition.group->state() == QAbstractAnimation::Running || settled)) return;
+
+    transition.targetVisible = visible;
+    transition.group->stop();
+    if (!motionEnabled_ || !isVisible()) {
+        transition.widget->setGeometry(transition.restingGeometry);
+        transition.effect->setOpacity(visible ? 1.0 : 0.0);
+        transition.widget->setVisible(visible);
+        if (!visible && transition.onHidden) transition.onHidden();
+        return;
+    }
+
+    const bool wasVisible = transition.widget->isVisible();
+    const qreal startOpacity = wasVisible ? transition.effect->opacity() : 0.0;
+    const QPoint restingPosition = transition.restingGeometry.topLeft();
+    const QPoint startPosition = wasVisible ? transition.widget->pos()
+                                            : restingPosition + QPoint(0, transition.offset);
+    const QPoint endPosition = visible ? restingPosition
+                                       : restingPosition + QPoint(0, transition.offset);
+    if (visible) {
+        transition.widget->setGeometry(transition.restingGeometry);
+        transition.widget->move(startPosition);
+        transition.widget->show();
+        transition.widget->raise();
+    } else if (!wasVisible) {
+        transition.effect->setOpacity(0.0);
+        transition.widget->setGeometry(transition.restingGeometry);
+        if (transition.onHidden) transition.onHidden();
+        return;
+    }
+
+    const int duration = visible ? kPanelEnterDurationMs : kPanelExitDurationMs;
+    transition.opacity->setDuration(duration);
+    transition.opacity->setEasingCurve(visible ? QEasingCurve::OutCubic : QEasingCurve::InCubic);
+    transition.opacity->setStartValue(startOpacity);
+    transition.opacity->setEndValue(visible ? 1.0 : 0.0);
+    transition.position->setDuration(duration);
+    transition.position->setEasingCurve(visible ? QEasingCurve::OutCubic : QEasingCurve::InCubic);
+    transition.position->setStartValue(startPosition);
+    transition.position->setEndValue(endPosition);
+    transition.group->start();
+}
+
+void QtPlayerWindow::StopUiAnimations() {
+    controlsAnimation_->stop();
+    const std::array<UiTransition*, 6> transitions{
+        emptyTransition_.get(), openingTransition_.get(), scrimTransition_.get(),
+        overlayTransition_.get(), sourceTransition_.get(), statisticsTransition_.get()};
+    for (UiTransition* transition : transitions) {
+        transition->group->stop();
+        transition->widget->setGeometry(transition->restingGeometry);
+        transition->effect->setOpacity(transition->targetVisible ? 1.0 : 0.0);
+        transition->widget->setVisible(transition->targetVisible);
+    }
+}
+
+void QtPlayerWindow::ClearOverlayWidgets() {
+    if (overlayMode_ != OverlayMode::None) return;
+    overlayList_->clear();
+    overlayEdit_->clear();
+}
+
+void QtPlayerWindow::ClearSourceSelectorWidgets() {
+    if (sourceSelection_) return;
+    sourceSeason_->clear();
+    sourceVoice_->clear();
+    sourceEpisode_->clear();
+    sourceStream_->clear();
+    sourceStatus_->clear();
+    sourceOpen_->setEnabled(false);
 }
 
 bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
@@ -804,6 +1014,18 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 11:
             *result = qRound(controlsOpacity_->opacity() * 1000.0);
             return true;
+        case 12:
+            *result = qRound(overlayTransition_->effect->opacity() * 1000.0);
+            return true;
+        case 13:
+            *result = qRound(emptyTransition_->effect->opacity() * 1000.0);
+            return true;
+        case 14:
+            *result = qRound(scrimTransition_->effect->opacity() * 1000.0);
+            return true;
+        case 15:
+            *result = overlay_->y() - overlayTransition_->restingGeometry.y();
+            return true;
         default:
             break;
         }
@@ -859,6 +1081,40 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             if (!SelectedSource()) { *result = 0; return true; }
             OpenSelectedSource();
             break;
+        case 9: {
+            ShowUrlOverlay();
+            const std::array<UiTransition*, 3> transitions{
+                emptyTransition_.get(), scrimTransition_.get(), overlayTransition_.get()};
+            for (UiTransition* transition : transitions) {
+                if (transition->group->state() == QAbstractAnimation::Running) {
+                    transition->group->setCurrentTime(transition->group->duration() / 2);
+                    transition->group->pause();
+                }
+            }
+            break;
+        }
+        case 10:
+            emptyTransition_->group->resume();
+            scrimTransition_->group->resume();
+            overlayTransition_->group->resume();
+            break;
+        case 11: {
+            HideOverlay();
+            const std::array<UiTransition*, 3> transitions{
+                emptyTransition_.get(), scrimTransition_.get(), overlayTransition_.get()};
+            for (UiTransition* transition : transitions) {
+                if (transition->group->state() == QAbstractAnimation::Running) {
+                    transition->group->setCurrentTime(transition->group->duration() / 2);
+                    transition->group->pause();
+                }
+            }
+            break;
+        }
+        case 12:
+            emptyTransition_->group->resume();
+            scrimTransition_->group->resume();
+            overlayTransition_->group->resume();
+            break;
         default: *result = 0; return true;
         }
         *result = 1;
@@ -890,7 +1146,7 @@ void QtPlayerWindow::showEvent(QShowEvent* event) {
     // Defer libmpv initialization until the first shown event-loop turn so
     // QOpenGLWidget has created its GUI-thread-owned context and framebuffer.
     QTimer::singleShot(0, this, [this] {
-        if (!closing_.load()) StartEngineInitialization();
+        if (!closing_.load() && !motionTest_) StartEngineInitialization();
     });
 }
 
@@ -907,7 +1163,7 @@ void QtPlayerWindow::closeEvent(QCloseEvent* event) {
     // is no foreign child HWND, so teardown cannot re-enter qwindows.
     hideTimer_->stop();
     uiTimer_->stop();
-    controlsAnimation_->stop();
+    StopUiAnimations();
     if (engineReady_) {
         videoSurface_->DetachEngine();
         engine_.Shutdown();
@@ -1226,9 +1482,6 @@ void QtPlayerWindow::ShowSourceSelector(ResolveResult result) {
 void QtPlayerWindow::HideSourceSelector() {
     sourceSelection_.reset();
     sourceSeasonIndex_ = sourceVoiceIndex_ = sourceEpisodeIndex_ = sourceStreamIndex_ = -1;
-    sourceSeason_->clear(); sourceVoice_->clear(); sourceEpisode_->clear(); sourceStream_->clear();
-    sourceStatus_->clear();
-    sourceOpen_->setEnabled(false);
     UpdateVisibility();
     setFocus();
 }
@@ -1455,6 +1708,7 @@ void QtPlayerWindow::UpdatePlaybackStartedState() {
 }
 
 void QtPlayerWindow::SetMediaLoaded(bool loaded) {
+    const bool wasLoaded = mediaLoaded_;
     mediaLoaded_ = loaded;
     mediaOpening_ = false;
     timelineDragging_ = false;
@@ -1473,6 +1727,9 @@ void QtPlayerWindow::SetMediaLoaded(bool loaded) {
         statisticsVisible_ = false;
         controlsVisible_ = true;
         controlsOpacity_->setOpacity(1.0);
+    } else if (!wasLoaded) {
+        controlsVisible_ = false;
+        controlsOpacity_->setOpacity(0.0);
     }
     UpdateVisibility();
     if (loaded) {
@@ -1574,7 +1831,7 @@ void QtPlayerWindow::RecordInteraction() {
 
 void QtPlayerWindow::ShowControls(bool show, bool animated) {
     if (!mediaLoaded_ || (!show && (overlayMode_ != OverlayMode::None || sourceSelection_))) return;
-    if (!animated || backgroundTest_) {
+    if (!animated || !motionEnabled_) {
         controlsAnimation_->stop();
         controlsVisible_ = show;
         controlsOpacity_->setOpacity(show ? 1.0 : 0.0);
@@ -1593,7 +1850,8 @@ void QtPlayerWindow::ShowControls(bool show, bool animated) {
         controls_->show();
         controls_->raise();
     }
-    controlsAnimation_->setDuration(show ? 140 : 105);
+    controlsAnimation_->setEasingCurve(show ? QEasingCurve::OutCubic : QEasingCurve::InCubic);
+    controlsAnimation_->setDuration(show ? 180 : 140);
     controlsAnimation_->setStartValue(controlsOpacity_->opacity());
     controlsAnimation_->setEndValue(targetOpacity);
     controlsAnimation_->start();
@@ -1734,8 +1992,6 @@ void QtPlayerWindow::HideOverlay() {
     overlayMode_ = OverlayMode::None;
     overlayAction_ = OverlayAction::None;
     overlayChoices_.clear();
-    overlayList_->clear();
-    overlayEdit_->clear();
     UpdateVisibility();
     setFocus();
     RecordInteraction();

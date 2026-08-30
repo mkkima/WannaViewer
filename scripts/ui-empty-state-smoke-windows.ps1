@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
-    [string]$CapturePath = ''
+    [string]$CapturePath = '',
+    [switch]$VerifyMotion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +54,10 @@ function Query-UiState([IntPtr]$Window, [int]$State) {
     return [WannaViewerQtSmokeNative]::SendMessage($Window, 0x8250, [IntPtr]$State, [IntPtr]::Zero) -ne [IntPtr]::Zero
 }
 
+function Get-UiNumber([IntPtr]$Window, [int]$State) {
+    return [WannaViewerQtSmokeNative]::SendMessage($Window, 0x8250, [IntPtr]$State, [IntPtr]::Zero).ToInt64()
+}
+
 function Invoke-UiAction([IntPtr]$Window, [int]$Action) {
     if ([WannaViewerQtSmokeNative]::SendMessage($Window, 0x8251, [IntPtr]$Action, [IntPtr]::Zero) -eq [IntPtr]::Zero) {
         throw "Background UI action $Action failed"
@@ -61,7 +66,7 @@ function Invoke-UiAction([IntPtr]$Window, [int]$Action) {
 
 $start = [Diagnostics.ProcessStartInfo]::new((Resolve-Path -LiteralPath $Player).Path)
 $start.UseShellExecute = $false
-$start.ArgumentList.Add('--background-ui-test')
+$start.ArgumentList.Add($(if ($VerifyMotion) { '--background-motion-test' } else { '--background-ui-test' }))
 $process = [Diagnostics.Process]::Start($start)
 try {
     [void]$process.WaitForInputIdle(10000)
@@ -92,12 +97,40 @@ try {
     if (-not (Query-UiState $main 1)) { throw 'Empty state or its open buttons are not visible' }
     if (Query-UiState $main 2) { throw 'URL overlay is unexpectedly visible on startup' }
     if (Query-UiState $main 6) { throw 'Playback controls are unexpectedly visible without media' }
+    if ($VerifyMotion -and (Get-UiNumber $main 13) -ne 1000) {
+        throw 'Empty state did not start fully opaque before the motion test'
+    }
 
-    Invoke-UiAction $main 1
+    Invoke-UiAction $main $(if ($VerifyMotion) { 9 } else { 1 })
     if (-not (Query-UiState $main 2)) { throw 'Embedded Qt URL overlay did not appear' }
-    if (Query-UiState $main 1) { throw 'Empty state remained visible under the URL overlay' }
+    if (-not $VerifyMotion -and (Query-UiState $main 1)) {
+        throw 'Empty state remained visible under the URL overlay'
+    }
     if ([WannaViewerQtSmokeNative]::GetForegroundWindow() -eq $main) {
         throw 'Opening the embedded URL overlay stole foreground focus'
+    }
+    if ($VerifyMotion) {
+        $overlayOpacity = Get-UiNumber $main 12
+        $emptyOpacity = Get-UiNumber $main 13
+        $scrimOpacity = Get-UiNumber $main 14
+        $overlayOffset = Get-UiNumber $main 15
+        if ($overlayOpacity -le 0 -or $overlayOpacity -ge 1000 -or
+            $emptyOpacity -le 0 -or $emptyOpacity -ge 1000 -or
+            $scrimOpacity -le 0 -or $scrimOpacity -ge 1000 -or
+            $overlayOffset -le 0 -or $overlayOffset -ge 16) {
+            throw "Modal entrance was not paused at an intermediate frame: overlay=$overlayOpacity empty=$emptyOpacity scrim=$scrimOpacity offset=$overlayOffset"
+        }
+        Invoke-UiAction $main 10
+        $motionDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        do {
+            Start-Sleep -Milliseconds 20
+        } while (((Get-UiNumber $main 12) -ne 1000 -or (Get-UiNumber $main 13) -ne 0 -or
+                  (Get-UiNumber $main 14) -ne 1000 -or (Get-UiNumber $main 15) -ne 0) -and
+                 [DateTime]::UtcNow -lt $motionDeadline)
+        if ((Get-UiNumber $main 12) -ne 1000 -or (Get-UiNumber $main 13) -ne 0 -or
+            (Get-UiNumber $main 14) -ne 1000 -or (Get-UiNumber $main 15) -ne 0) {
+            throw 'URL overlay entrance animation did not settle at its exact target state'
+        }
     }
 
     if ($CapturePath) {
@@ -122,9 +155,29 @@ try {
         finally { $bitmap.Dispose() }
     }
 
-    Invoke-UiAction $main 2
+    Invoke-UiAction $main $(if ($VerifyMotion) { 11 } else { 2 })
     if (Query-UiState $main 2) { throw 'Embedded Qt URL overlay did not close' }
     if (-not (Query-UiState $main 1)) { throw 'Empty state did not return after closing the URL overlay' }
+    if ($VerifyMotion) {
+        $overlayOpacity = Get-UiNumber $main 12
+        $emptyOpacity = Get-UiNumber $main 13
+        $scrimOpacity = Get-UiNumber $main 14
+        if ($overlayOpacity -le 0 -or $overlayOpacity -ge 1000 -or
+            $emptyOpacity -le 0 -or $emptyOpacity -ge 1000 -or
+            $scrimOpacity -le 0 -or $scrimOpacity -ge 1000) {
+            throw "Modal exit was not paused at an intermediate frame: overlay=$overlayOpacity empty=$emptyOpacity scrim=$scrimOpacity"
+        }
+        Invoke-UiAction $main 12
+        $motionDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        do {
+            Start-Sleep -Milliseconds 20
+        } while (((Get-UiNumber $main 12) -ne 0 -or (Get-UiNumber $main 13) -ne 1000 -or
+                  (Get-UiNumber $main 14) -ne 0) -and [DateTime]::UtcNow -lt $motionDeadline)
+        if ((Get-UiNumber $main 12) -ne 0 -or (Get-UiNumber $main 13) -ne 1000 -or
+            (Get-UiNumber $main 14) -ne 0) {
+            throw 'Modal exit animation did not settle at its exact target state'
+        }
+    }
     Invoke-UiAction $main 5
     if (-not $process.WaitForExit(10000)) { throw 'Qt player did not close cleanly' }
     if ($process.ExitCode -ne 0) { throw "Qt player exited with code $($process.ExitCode)" }
@@ -132,4 +185,8 @@ try {
     if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
 }
 
-Write-Host 'Background Qt empty-state smoke passed without using the foreground desktop.'
+if ($VerifyMotion) {
+    Write-Host 'Background Qt motion smoke passed: fade, slide, scrim, settled states, clean close.'
+} else {
+    Write-Host 'Background Qt empty-state smoke passed without using the foreground desktop.'
+}

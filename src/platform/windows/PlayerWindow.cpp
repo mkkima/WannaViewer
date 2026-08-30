@@ -38,6 +38,8 @@ constexpr UINT kResolverMessage = WM_APP + 2;
 constexpr UINT kInteractionMessage = WM_APP + 3;
 constexpr UINT kTimelineHoverMessage = WM_APP + 4;
 constexpr UINT kTimelineSeekMessage = WM_APP + 5;
+constexpr UINT kTrackbarPaintMessage = WM_APP + 6;
+constexpr UINT kEngineInitializedMessage = WM_APP + 7;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr ULONGLONG kControlsHideDelayMs = 1500;
 constexpr ULONGLONG kControlsShowAnimationMs = 160;
@@ -424,6 +426,19 @@ LRESULT CALLBACK InteractionSubclass(HWND window, UINT message, WPARAM wParam, L
                                      UINT_PTR, DWORD_PTR reference) {
     const HWND owner = reinterpret_cast<HWND>(reference);
     const bool timeline = GetDlgCtrlID(window) == kTimeline;
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        const HDC dc = BeginPaint(window, &paint);
+        SendMessageW(owner, kTrackbarPaintMessage,
+                     reinterpret_cast<WPARAM>(window), reinterpret_cast<LPARAM>(dc));
+        EndPaint(window, &paint);
+        return 0;
+    }
+    if (message == WM_PRINTCLIENT) {
+        SendMessageW(owner, kTrackbarPaintMessage,
+                     reinterpret_cast<WPARAM>(window), static_cast<LPARAM>(wParam));
+        return 0;
+    }
     if (message == WM_ERASEBKGND) return 1;
     if (message == WM_MOUSEMOVE) {
         if (!GetPropW(window, kHoverProperty)) {
@@ -551,6 +566,7 @@ PlayerWindow::PlayerWindow(AppPaths paths, Config config, Logger& logger)
 PlayerWindow::~PlayerWindow() {
     closing_ = true;
     if (resolverThread_.joinable()) { resolverThread_.request_stop(); resolverThread_.join(); }
+    if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
     engine_.Shutdown();
     if (font_) DeleteObject(font_);
     if (iconFont_) DeleteObject(iconFont_);
@@ -606,6 +622,7 @@ void PlayerWindow::Create(HINSTANCE instance, int showCommand, bool backgroundTe
     ShowWindow(window_, backgroundTest ? SW_SHOWNOACTIVATE : showCommand);
     UpdateWindow(window_);
     RecordInteraction();
+    StartEngineInitialization();
 }
 
 void PlayerWindow::OpenInitial(std::string value) { initial_ = std::move(value); }
@@ -791,13 +808,67 @@ void PlayerWindow::CreateControls() {
     LayoutControls();
 }
 
-void PlayerWindow::EnsureEngineInitialized() {
-    if (engine_.IsInitialized()) return;
-    engine_.Initialize(reinterpret_cast<std::uintptr_t>(video_), [this](PlaybackEvent event) {
-        if (closing_.load()) return;
-        auto payload = std::make_unique<PlaybackEvent>(std::move(event));
-        if (PostMessageW(window_, kPlaybackMessage, 0, reinterpret_cast<LPARAM>(payload.get()))) payload.release();
+void PlayerWindow::StartEngineInitialization() {
+    if (engineReady_ || engineInitializationThread_.joinable()) return;
+    {
+        std::scoped_lock lock(engineInitializationMutex_);
+        engineInitializationError_.reset();
+    }
+    engineInitializationThread_ = std::jthread([this] {
+        try {
+            engine_.Initialize(reinterpret_cast<std::uintptr_t>(video_), [this](PlaybackEvent event) {
+                if (closing_.load()) return;
+                auto payload = std::make_unique<PlaybackEvent>(std::move(event));
+                if (PostMessageW(window_, kPlaybackMessage, 0,
+                                 reinterpret_cast<LPARAM>(payload.get()))) payload.release();
+            });
+        } catch (const std::exception& error) {
+            std::scoped_lock lock(engineInitializationMutex_);
+            engineInitializationError_ = error.what();
+        } catch (...) {
+            std::scoped_lock lock(engineInitializationMutex_);
+            engineInitializationError_ = "Unknown libmpv initialization failure";
+        }
+        if (!closing_.load()) PostMessageW(window_, kEngineInitializedMessage, 0, 0);
     });
+}
+
+void PlayerWindow::HandleEngineInitialized() {
+    if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
+    if (closing_.load()) return;
+
+    std::optional<std::string> error;
+    {
+        std::scoped_lock lock(engineInitializationMutex_);
+        error = std::move(engineInitializationError_);
+        engineInitializationError_.reset();
+    }
+    if (error) {
+        logger_.Write(LogLevel::Error, "playback", "libmpv initialization failed: " + *error);
+        const bool requestedPlayback = pendingMedia_.has_value();
+        pendingMedia_.reset();
+        mediaOpening_ = false;
+        SetWindowTextW(window_, L"WannaViewer");
+        LayoutControls();
+        UpdateActiveTimer();
+        if (requestedPlayback) ShowError(L"Playback", *error);
+        return;
+    }
+
+    engineReady_ = true;
+    if (!pendingMedia_) return;
+    auto media = std::move(*pendingMedia_);
+    pendingMedia_.reset();
+    try {
+        playbackLoadStarted_ = std::chrono::steady_clock::now();
+        engine_.Open(media.value, media.headers, media.externalAudioUrl);
+    } catch (const std::exception& openError) {
+        mediaOpening_ = false;
+        SetWindowTextW(window_, L"WannaViewer");
+        LayoutControls();
+        UpdateActiveTimer();
+        ShowError(L"Playback", openError.what());
+    }
 }
 
 void PlayerWindow::OpenMedia(std::string value,
@@ -809,13 +880,21 @@ void PlayerWindow::OpenMedia(std::string value,
     playbackStarted_ = false;
     startupTimeoutReported_ = false;
     playbackLoadStarted_ = std::chrono::steady_clock::now();
+    SetWindowTextW(window_, engineReady_ ? L"WannaViewer — opening…"
+                                        : L"WannaViewer — preparing player…");
     LayoutControls();
     UpdateActiveTimer();
+    if (!engineReady_) {
+        pendingMedia_ = PendingMedia{std::move(value), std::move(headers),
+                                     std::move(externalAudioUrl)};
+        StartEngineInitialization();
+        return;
+    }
     try {
-        EnsureEngineInitialized();
         engine_.Open(value, headers, externalAudioUrl);
     } catch (...) {
         mediaOpening_ = false;
+        SetWindowTextW(window_, L"WannaViewer");
         LayoutControls();
         UpdateActiveTimer();
         throw;
@@ -1175,6 +1254,10 @@ void PlayerWindow::UpdateActiveTimer() {
 }
 
 void PlayerWindow::UpdateUi() {
+    // The video engine is prewarmed on a worker thread. Do not query its
+    // partially constructed handle or start the first-frame timeout until
+    // initialization has completed on that thread.
+    if (!engineReady_) return;
     const double duration = engine_.Duration();
     const double position = engine_.Position();
     const ULONGLONG now = GetTickCount64();
@@ -2180,24 +2263,24 @@ LRESULT PlayerWindow::DrawControl(DRAWITEMSTRUCT item) {
     return TRUE;
 }
 
-LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW customDraw) {
-    if (customDraw.dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+void PlayerWindow::DrawTrackbar(HWND control, HDC targetDc) {
+    if (!control || !targetDc) return;
     RECT client{};
-    GetClientRect(customDraw.hdr.hwndFrom, &client);
-    BufferedDrawSurface surface(customDraw.hdc, client);
-    customDraw.hdc = surface.Dc();
-    FillRect(customDraw.hdc, &client, panelBrush_);
-    const bool timeline = customDraw.hdr.hwndFrom == timeline_;
-    const bool enabled = IsWindowEnabled(customDraw.hdr.hwndFrom) != FALSE;
-    const int minimum = static_cast<int>(SendMessageW(customDraw.hdr.hwndFrom, TBM_GETRANGEMIN, 0, 0));
-    const int maximum = static_cast<int>(SendMessageW(customDraw.hdr.hwndFrom, TBM_GETRANGEMAX, 0, 0));
-    const int position = static_cast<int>(SendMessageW(customDraw.hdr.hwndFrom, TBM_GETPOS, 0, 0));
+    GetClientRect(control, &client);
+    BufferedDrawSurface surface(targetDc, client);
+    HDC dc = surface.Dc();
+    FillRect(dc, &client, panelBrush_);
+    const bool timeline = control == timeline_;
+    const bool enabled = IsWindowEnabled(control) != FALSE;
+    const int minimum = static_cast<int>(SendMessageW(control, TBM_GETRANGEMIN, 0, 0));
+    const int maximum = static_cast<int>(SendMessageW(control, TBM_GETRANGEMAX, 0, 0));
+    const int position = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
     const double interaction = timeline ? std::clamp(timelineAnimationProgress_, 0.0, 1.0) : 0.0;
     const int margin = Scale(timeline ? kTimelineChannelInset : 5);
     const int centerY = timeline ? client.bottom - Scale(9) : (client.top + client.bottom) / 2;
     RECT channel{client.left + margin, centerY - Scale(timeline ? 2 : 1),
                  client.right - margin, centerY + Scale(2)};
-    FillRoundedRectangle(customDraw.hdc, channel,
+    FillRoundedRectangle(dc, channel,
                          timeline ? BlendColor(RGB(48, 48, 48), RGB(66, 66, 66), interaction)
                                   : RGB(48, 48, 48),
                          Scale(4));
@@ -2207,12 +2290,12 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW customDraw) {
     RECT progress = channel;
     progress.right = progress.left + static_cast<int>(static_cast<double>(progress.right - progress.left) * ratio);
     if (progress.right > progress.left)
-        FillRoundedRectangle(customDraw.hdc, progress, enabled ? kTextColor : RGB(82, 82, 82), Scale(4));
+        FillRoundedRectangle(dc, progress, enabled ? kTextColor : RGB(82, 82, 82), Scale(4));
     const int thumbX = std::clamp(progress.right, channel.left, channel.right);
     const float thumbRadius = timeline
         ? static_cast<float>(Scale(5)) + static_cast<float>(Scale(2)) * static_cast<float>(interaction)
         : static_cast<float>(Scale(4));
-    FillSmoothEllipse(customDraw.hdc, static_cast<float>(thumbX) - thumbRadius,
+    FillSmoothEllipse(dc, static_cast<float>(thumbX) - thumbRadius,
                       static_cast<float>(centerY) - thumbRadius, thumbRadius * 2.0F,
                       thumbRadius * 2.0F, enabled ? kTextColor : RGB(82, 82, 82));
     if (timeline && interaction > 0.01 && engine_.Duration() > 0.0) {
@@ -2229,9 +2312,9 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW customDraw) {
                                static_cast<int>(client.right) - bubbleWidth),
                     client.top + bubbleOffset, 0, Scale(29) + bubbleOffset};
         bubble.right = bubble.left + bubbleWidth;
-        PaintRoundedRectangle(customDraw.hdc, bubble, RGB(7, 7, 7), kBorderColor, Scale(12));
+        PaintRoundedRectangle(dc, bubble, RGB(7, 7, 7), kBorderColor, Scale(12));
         {
-            Gdiplus::Graphics graphics(customDraw.hdc);
+            Gdiplus::Graphics graphics(dc);
             ConfigureSmoothGraphics(graphics);
             Gdiplus::SolidBrush arrowFill(SmoothColor(RGB(7, 7, 7)));
             Gdiplus::Pen arrowBorder(SmoothColor(kBorderColor), 1.0F);
@@ -2241,12 +2324,11 @@ LRESULT PlayerWindow::DrawTrackbar(NMCUSTOMDRAW customDraw) {
             graphics.FillPolygon(&arrowFill, arrow, static_cast<INT>(std::size(arrow)));
             graphics.DrawLines(&arrowBorder, arrow, static_cast<INT>(std::size(arrow)));
         }
-        SetBkMode(customDraw.hdc, TRANSPARENT); SetTextColor(customDraw.hdc, kTextColor);
-        const HGDIOBJ previousFont = SelectObject(customDraw.hdc, font_);
-        DrawTextW(customDraw.hdc, label.c_str(), -1, &bubble, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        if (previousFont) SelectObject(customDraw.hdc, previousFont);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, kTextColor);
+        const HGDIOBJ previousFont = SelectObject(dc, font_);
+        DrawTextW(dc, label.c_str(), -1, &bubble, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (previousFont) SelectObject(dc, previousFont);
     }
-    return CDRF_SKIPDEFAULT;
 }
 
 LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
@@ -2311,6 +2393,12 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             CancelTimelineDrag();
             break;
         }
+        return 0;
+    case kTrackbarPaintMessage:
+        DrawTrackbar(reinterpret_cast<HWND>(wParam), reinterpret_cast<HDC>(lParam));
+        return 0;
+    case kEngineInitializedMessage:
+        HandleEngineInitialized();
         return 0;
     case WM_TIMER:
         if (wParam == kUiTimer) {
@@ -2390,12 +2478,6 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
             measure->itemHeight = static_cast<UINT>(Scale(measure->CtlID == kOverlayList ? 38 : 34));
             return TRUE;
         }
-        break;
-    }
-    case WM_NOTIFY: {
-        auto* header = reinterpret_cast<NMHDR*>(lParam);
-        if (header && header->code == NM_CUSTOMDRAW && (header->hwndFrom == timeline_ || header->hwndFrom == volume_))
-            return DrawTrackbar(*reinterpret_cast<NMCUSTOMDRAW*>(lParam));
         break;
     }
     case WM_HSCROLL:
@@ -2508,11 +2590,15 @@ LRESULT PlayerWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         return 1;
     }
     case WM_CLOSE:
+        closing_ = true;
+        ShowWindow(window_, SW_HIDE);
+        if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
         DestroyWindow(window_);
         return 0;
     case WM_DESTROY:
         closing_ = true;
         if (resolverThread_.joinable()) resolverThread_.request_stop();
+        if (engineInitializationThread_.joinable()) engineInitializationThread_.join();
         engine_.Shutdown();
         KillTimer(window_, kUiTimer);
         PostQuitMessage(0);

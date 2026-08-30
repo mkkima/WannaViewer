@@ -65,10 +65,14 @@ void MpvEngine::SetRequiredOption(const char* name, const std::string& value) {
 }
 
 void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) {
-    if (initialized_.exchange(true)) return;
+    if (initialized_.load(std::memory_order_acquire)) return;
+    bool expected = false;
+    if (!initializing_.compare_exchange_strong(expected, true)) return;
     try {
+        const auto initializationStarted = std::chrono::steady_clock::now();
         callback_ = std::move(callback);
         api_.Load(LibraryPath());
+        const auto libraryLoaded = std::chrono::steady_clock::now();
         handle_ = api_.Create();
         if (!handle_) throw std::runtime_error("mpv_create failed");
 
@@ -116,19 +120,39 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
 
         const int result = api_.Initialize(handle_);
         if (result < 0) throw std::runtime_error(std::string("mpv_initialize failed: ") + api_.ErrorString(result));
+        const auto coreInitialized = std::chrono::steady_clock::now();
 
         (void)api_.RequestLogMessages(handle_, logger_.Level() >= LogLevel::Debug ? "info" : "warn");
         (void)api_.ObserveProperty(handle_, kPauseObserver, "pause", MPV_FORMAT_FLAG);
         (void)api_.ObserveProperty(handle_, kTrackObserver, "track-list/count", MPV_FORMAT_INT64);
         (void)api_.ObserveProperty(handle_, kTimeObserver, "time-pos", MPV_FORMAT_DOUBLE);
+        initialized_.store(true, std::memory_order_release);
         eventThread_ = std::jthread([this](std::stop_token token) { EventLoop(token); });
 #ifdef _WIN32
-        logger_.Write(LogLevel::Info, "playback", "libmpv initialized: gpu-next, hwdec=auto, D3D11 output");
+        logger_.Write(LogLevel::Info, "playback",
+                      std::format("libmpv initialized in {} ms (DLL {} ms, core {} ms): "
+                                  "gpu-next, hwdec=auto, D3D11 output",
+                                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      coreInitialized - initializationStarted).count(),
+                                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      libraryLoaded - initializationStarted).count(),
+                                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      coreInitialized - libraryLoaded).count()));
 #else
-        logger_.Write(LogLevel::Info, "playback", "libmpv initialized: gpu-next, hwdec=auto, Cocoa output");
+        logger_.Write(LogLevel::Info, "playback",
+                      std::format("libmpv initialized in {} ms (library {} ms, core {} ms): "
+                                  "gpu-next, hwdec=auto, Cocoa output",
+                                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      coreInitialized - initializationStarted).count(),
+                                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      libraryLoaded - initializationStarted).count(),
+                                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      coreInitialized - libraryLoaded).count()));
 #endif
+        initializing_.store(false, std::memory_order_release);
     } catch (...) {
-        initialized_ = false;
+        initialized_.store(false, std::memory_order_release);
+        initializing_.store(false, std::memory_order_release);
         if (handle_) {
             api_.TerminateDestroy(handle_);
             handle_ = nullptr;
@@ -151,7 +175,7 @@ void MpvEngine::Shutdown() noexcept {
 bool MpvEngine::IsInitialized() const noexcept { return initialized_.load(); }
 
 void MpvEngine::Command(std::initializer_list<std::string> arguments) {
-    if (!handle_) return;
+    if (!initialized_.load(std::memory_order_acquire) || !handle_) return;
     std::vector<const char*> pointers;
     pointers.reserve(arguments.size() + 1);
     for (const auto& argument : arguments) pointers.push_back(argument.c_str());
@@ -162,6 +186,8 @@ void MpvEngine::Command(std::initializer_list<std::string> arguments) {
 
 void MpvEngine::Open(std::string_view pathOrUrl, const std::vector<std::pair<std::string, std::string>>& headers,
                      std::string_view externalAudioUrl) {
+    if (!initialized_.load(std::memory_order_acquire))
+        throw std::logic_error("libmpv is not initialized");
     std::vector<std::string> fields;
     fields.reserve(std::min<std::size_t>(headers.size(), 64));
     std::size_t totalBytes = 0;
@@ -200,10 +226,20 @@ void MpvEngine::FrameStep() { Command({"frame-step"}); }
 void MpvEngine::ChangeChapter(int delta) { Command({"add", "chapter", std::to_string(delta)}); }
 void MpvEngine::CycleAudio() { Command({"cycle", "audio"}); }
 void MpvEngine::CycleSubtitles() { Command({"cycle", "sub"}); }
-void MpvEngine::SetAudioTrack(std::int64_t id) { (void)api_.SetPropertyString(handle_, "aid", std::to_string(id).c_str()); }
-void MpvEngine::SetSubtitleTrack(std::int64_t id) { (void)api_.SetPropertyString(handle_, "sid", id < 0 ? "no" : std::to_string(id).c_str()); }
-void MpvEngine::SetVideoTrack(std::int64_t id) { (void)api_.SetPropertyString(handle_, "vid", std::to_string(id).c_str()); }
+void MpvEngine::SetAudioTrack(std::int64_t id) {
+    if (initialized_.load(std::memory_order_acquire))
+        (void)api_.SetPropertyString(handle_, "aid", std::to_string(id).c_str());
+}
+void MpvEngine::SetSubtitleTrack(std::int64_t id) {
+    if (initialized_.load(std::memory_order_acquire))
+        (void)api_.SetPropertyString(handle_, "sid", id < 0 ? "no" : std::to_string(id).c_str());
+}
+void MpvEngine::SetVideoTrack(std::int64_t id) {
+    if (initialized_.load(std::memory_order_acquire))
+        (void)api_.SetPropertyString(handle_, "vid", std::to_string(id).c_str());
+}
 void MpvEngine::SetVolume(double value) {
+    if (!initialized_.load(std::memory_order_acquire)) return;
     value = std::clamp(value, 0.0, 100.0);
     (void)api_.SetProperty(handle_, "volume", MPV_FORMAT_DOUBLE, &value);
 }
@@ -211,6 +247,7 @@ void MpvEngine::SetVolume(double value) {
 void MpvEngine::AddSubtitle(std::string_view path) { Command({"sub-add", std::string(path), "select"}); }
 
 void MpvEngine::ConfigureCache(std::string_view mode) {
+    if (!initialized_.load(std::memory_order_acquire)) return;
     std::string readahead = "20";
     std::string maximum = "157286400";
     if (mode == "low-latency") { readahead = "5"; maximum = "67108864"; }
@@ -220,10 +257,12 @@ void MpvEngine::ConfigureCache(std::string_view mode) {
 }
 
 void MpvEngine::SetHardwareDecoding(bool enabled) {
+    if (!initialized_.load(std::memory_order_acquire)) return;
     (void)api_.SetPropertyString(handle_, "hwdec", enabled ? "auto" : "no");
 }
 
 void MpvEngine::SetVideoSync(std::string_view mode) {
+    if (!initialized_.load(std::memory_order_acquire)) return;
     const std::string value(mode);
     (void)api_.SetPropertyString(handle_, "video-sync", value.c_str());
 }
@@ -245,13 +284,19 @@ std::vector<MediaTrack> MpvEngine::Tracks() const {
     return tracks_;
 }
 
-double MpvEngine::Position() const { return handle_ ? api_.GetDouble(handle_, "time-pos") : 0.0; }
-double MpvEngine::Duration() const { return handle_ ? api_.GetDouble(handle_, "duration") : 0.0; }
-bool MpvEngine::IsPaused() const { return !handle_ || api_.GetFlag(handle_, "pause", true); }
+double MpvEngine::Position() const {
+    return initialized_.load(std::memory_order_acquire) ? api_.GetDouble(handle_, "time-pos") : 0.0;
+}
+double MpvEngine::Duration() const {
+    return initialized_.load(std::memory_order_acquire) ? api_.GetDouble(handle_, "duration") : 0.0;
+}
+bool MpvEngine::IsPaused() const {
+    return !initialized_.load(std::memory_order_acquire) || api_.GetFlag(handle_, "pause", true);
+}
 
 PlaybackStatistics MpvEngine::Statistics() {
     PlaybackStatistics result;
-    if (!handle_) return result;
+    if (!initialized_.load(std::memory_order_acquire)) return result;
     result.videoCodec = api_.GetString(handle_, "video-codec");
     const auto width = api_.GetInt64(handle_, "video-params/w");
     const auto height = api_.GetInt64(handle_, "video-params/h");

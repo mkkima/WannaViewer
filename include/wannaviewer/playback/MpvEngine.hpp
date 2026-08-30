@@ -101,6 +101,7 @@ private:
     EventCallback callback_;
     std::jthread eventThread_;
     std::atomic_bool initialized_{false};
+    std::atomic_bool initializing_{false};
     mutable std::mutex tracksMutex_;
     std::vector<MediaTrack> tracks_;
     mutable std::mutex shaderMutex_;

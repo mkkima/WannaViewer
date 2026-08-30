@@ -13,9 +13,10 @@
 
 #include <atomic>
 #include <chrono>
-#include <thread>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -39,12 +40,18 @@ public:
 private:
     enum class OverlayMode { None, Choice, Url, Message };
     enum class OverlayAction { None, Audio, Subtitles, Video, Shaders, Settings };
+    struct PendingMedia final {
+        std::string value;
+        std::vector<std::pair<std::string, std::string>> headers;
+        std::string externalAudioUrl;
+    };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void CreateControls();
     void CreateFonts();
-    void EnsureEngineInitialized();
+    void StartEngineInitialization();
+    void HandleEngineInitialized();
     void OpenMedia(std::string value,
                    std::vector<std::pair<std::string, std::string>> headers = {},
                    std::string externalAudioUrl = {});
@@ -101,7 +108,7 @@ private:
     void LogHardwareInformation();
     void FinishBenchmark();
     LRESULT DrawControl(DRAWITEMSTRUCT item);
-    LRESULT DrawTrackbar(NMCUSTOMDRAW customDraw);
+    void DrawTrackbar(HWND control, HDC targetDc);
     void DrawPlayerIcon(HDC dc, UINT id, const RECT& rectangle, bool enabled);
     [[nodiscard]] int Scale(int value) const noexcept;
 
@@ -173,6 +180,10 @@ private:
     std::vector<std::wstring> subtitleTrackLabels_;
     std::vector<std::wstring> videoTrackLabels_;
     std::jthread resolverThread_;
+    std::jthread engineInitializationThread_;
+    std::mutex engineInitializationMutex_;
+    std::optional<std::string> engineInitializationError_;
+    std::optional<PendingMedia> pendingMedia_;
     std::atomic_bool closing_{false};
     std::atomic_bool resolving_{false};
     std::optional<std::string> initial_;
@@ -216,6 +227,7 @@ private:
     bool mediaLoaded_{false};
     bool mediaOpening_{false};
     bool playbackStarted_{false};
+    bool engineReady_{false};
     bool startupTimeoutReported_{false};
     bool compactLayout_{false};
     bool fullscreen_{false};

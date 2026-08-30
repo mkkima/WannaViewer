@@ -15,6 +15,7 @@ public static class WannaViewerSmokeNative {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProcedure callback, IntPtr data);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr window, System.Text.StringBuilder text, int count);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
@@ -55,6 +56,16 @@ try {
     } while (-not $process.HasExited -and $window -eq [IntPtr]::Zero -and
              [DateTime]::UtcNow -lt $startupDeadline)
     if ($process.HasExited -or $window -eq [IntPtr]::Zero) { throw 'Player window did not start' }
+    $playbackDeadline = [DateTime]::UtcNow.AddSeconds(35)
+    do {
+        $title = [Text.StringBuilder]::new(256)
+        [void][WannaViewerSmokeNative]::GetWindowText($window, $title, $title.Capacity)
+        if ($title.ToString().Contains('playing')) { break }
+        Start-Sleep -Milliseconds 50
+        $process.Refresh()
+    } while (-not $process.HasExited -and [DateTime]::UtcNow -lt $playbackDeadline)
+    if ($process.HasExited) { throw "Player exited before playback started with code $($process.ExitCode)" }
+    if (-not $title.ToString().Contains('playing')) { throw "Playback did not start; last window title: $title" }
     foreach ($key in @(0x20,0x20,0x27,0x53,0x41,0x46,0x46,0x79)) {
         [WannaViewerSmokeNative]::PostMessage($window, 0x0100, [IntPtr]$key, [IntPtr]::Zero) | Out-Null
         Start-Sleep -Milliseconds 250

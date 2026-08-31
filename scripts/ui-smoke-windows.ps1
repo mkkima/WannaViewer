@@ -3,9 +3,11 @@ param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
     [Parameter(Mandatory=$true)][string]$Media,
     [switch]$SkipInteractions,
+    [ValidateSet('None', 'Continue', 'Restart')][string]$ResumeChoice = 'None',
     [double]$MinimumInitialPositionSeconds = 0,
     [switch]$WaitForResumeEntryRemoval,
     [switch]$VerifySettingPersistence,
+    [switch]$VerifyExtendedSettings,
     [string]$CapturePath = ''
 )
 
@@ -68,6 +70,7 @@ $configPath = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Player).
 $configExisted = Test-Path -LiteralPath $configPath
 $originalConfigBytes = if ($configExisted) { [IO.File]::ReadAllBytes($configPath) } else { $null }
 $settingsPersistenceVerified = $false
+$extendedSettingsVerified = $false
 $start = [Diagnostics.ProcessStartInfo]::new((Resolve-Path -LiteralPath $Player).Path)
 $start.UseShellExecute = $false
 $start.ArgumentList.Add('--background-ui-test')
@@ -86,11 +89,27 @@ try {
 
     $playbackDeadline = [DateTime]::UtcNow.AddSeconds(35)
     do {
-        if ((Get-UiValue $window 5) -eq 1) { break }
+        if ((Get-UiValue $window 5) -eq 1 -or (Get-UiValue $window 22) -eq 1) { break }
         Start-Sleep -Milliseconds 50
         $process.Refresh()
     } while (-not $process.HasExited -and [DateTime]::UtcNow -lt $playbackDeadline)
     if ($process.HasExited) { throw "Qt player exited before playback started with code $($process.ExitCode)" }
+    $resumePromptVisible = (Get-UiValue $window 22) -eq 1
+    if ($resumePromptVisible) {
+        if ($ResumeChoice -eq 'None') { throw 'A resume prompt appeared without an expected test choice' }
+        Invoke-UiAction $window $(if ($ResumeChoice -eq 'Continue') { 20 } else { 21 })
+        if ($ResumeChoice -eq 'Restart' -and (Get-UiValue $window 21) -ne 0) {
+            throw 'Starting from the beginning retained the old resume entry'
+        }
+        $playbackDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            if ((Get-UiValue $window 5) -eq 1) { break }
+            Start-Sleep -Milliseconds 40
+            $process.Refresh()
+        } while (-not $process.HasExited -and [DateTime]::UtcNow -lt $playbackDeadline)
+    } elseif ($ResumeChoice -ne 'None') {
+        throw "Expected a resume prompt for choice '$ResumeChoice', but none appeared"
+    }
     if ((Get-UiValue $window 5) -ne 1) {
         $title = [Text.StringBuilder]::new(256)
         [void][WannaViewerQtPlaybackSmokeNative]::GetWindowText($window, $title, $title.Capacity)
@@ -197,6 +216,27 @@ try {
             }
         }
 
+        if ($VerifyExtendedSettings) {
+            Invoke-UiAction $window 22
+            if ((Get-UiValue $window 23) -ne 1) { throw 'Settings overlay did not open' }
+            $settingsListState = Get-UiValue $window 24
+            if ($settingsListState -ne ((12 -shl 8) -bor 5)) {
+                throw "Settings overlay state was $settingsListState instead of twelve choices with five active values"
+            }
+            Invoke-UiAction $window 23
+            if ((Get-UiValue $window 25) -ne 0) { throw 'Resume setting did not turn off' }
+            Invoke-UiAction $window 24
+            if ((Get-UiValue $window 25) -ne 1) { throw 'Resume setting did not turn back on' }
+            Invoke-UiAction $window 25
+            if ((Get-UiValue $window 26) -ne 0) { throw 'Animation setting did not turn off' }
+            Invoke-UiAction $window 26
+            if ((Get-UiValue $window 26) -ne 1) { throw 'Animation setting did not turn back on' }
+            Invoke-UiAction $window 28
+            if ((Get-UiValue $window 27) -ne 1) { throw 'Named shader preset did not become active' }
+            Invoke-UiAction $window 27
+            if ((Get-UiValue $window 21) -ne 0) { throw 'Clear history retained the current resume entry' }
+        }
+
         foreach ($key in @(0x20,0x20,0x27,0x53,0x41,0x46,0x46,0x79)) {
             [void][WannaViewerQtPlaybackSmokeNative]::PostMessage($window, 0x0100, [IntPtr]$key, [IntPtr]::Zero)
             [void][WannaViewerQtPlaybackSmokeNative]::PostMessage($window, 0x0101, [IntPtr]$key, [IntPtr]::Zero)
@@ -214,6 +254,12 @@ try {
     if ($VerifySettingPersistence -and (Test-Path -LiteralPath $configPath)) {
         $settingsPersistenceVerified = Select-String -LiteralPath $configPath -Pattern '^playback\.volume=37$' -Quiet
     }
+    if ($VerifyExtendedSettings -and (Test-Path -LiteralPath $configPath)) {
+        $resumeSaved = Select-String -LiteralPath $configPath -Pattern '^playback\.resume=true$' -Quiet
+        $animationsSaved = Select-String -LiteralPath $configPath -Pattern '^ui\.animations=true$' -Quiet
+        $shaderSaved = Select-String -LiteralPath $configPath -Pattern '^shader\.preset=anime4k-fast$' -Quiet
+        $extendedSettingsVerified = $resumeSaved -and $animationsSaved -and $shaderSaved
+    }
     if ($configExisted) {
         [IO.File]::WriteAllBytes($configPath, $originalConfigBytes)
     } elseif (Test-Path -LiteralPath $configPath) {
@@ -223,6 +269,9 @@ try {
 
 if ($VerifySettingPersistence -and -not $settingsPersistenceVerified) {
     throw 'Volume setting was not persisted to config/player.conf'
+}
+if ($VerifyExtendedSettings -and -not $extendedSettingsVerified) {
+    throw 'Extended playback settings were not persisted to config/player.conf'
 }
 
 if ($SkipInteractions) {

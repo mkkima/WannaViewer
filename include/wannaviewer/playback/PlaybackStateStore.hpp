@@ -29,6 +29,7 @@ public:
     [[nodiscard]] static bool ShouldPersist(double positionSeconds, double durationSeconds) noexcept;
     [[nodiscard]] bool Update(std::string key, double positionSeconds, double durationSeconds);
     [[nodiscard]] bool Remove(std::string_view key);
+    [[nodiscard]] bool Clear() noexcept;
     [[nodiscard]] std::size_t Size() const noexcept;
 
 private:

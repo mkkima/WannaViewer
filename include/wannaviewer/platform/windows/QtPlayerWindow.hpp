@@ -73,7 +73,7 @@ protected:
 
 private:
     enum class OverlayMode { None, Choice, Url, Message };
-    enum class OverlayAction { None, Audio, Subtitles, Video, Shaders, Settings };
+    enum class OverlayAction { None, Audio, Subtitles, Video, Shaders, Settings, Resume };
     struct PendingMedia final {
         std::string value;
         std::vector<std::pair<std::string, std::string>> headers;
@@ -126,7 +126,11 @@ private:
     void HidePlaybackFeedback();
     void UpdateControlStates();
     void RestorePlaybackProgress();
+    void CompleteResumePrompt(bool resume);
     void SavePlaybackProgress(bool completed = false);
+    [[nodiscard]] bool PersistPlaybackState();
+    void SetResumeEnabled(bool enabled);
+    void ClearPlaybackHistory();
     void SaveUserSettings();
     void RecordInteraction();
     void ShowControls(bool show, bool animated = true);
@@ -143,8 +147,10 @@ private:
     void ShowMessageOverlay(QString title, QString detail);
     void HideOverlay();
     void ApplyOverlaySelection();
-    void ApplyShaderHotkey(int hotkey);
-    void ApplyShaderPreset(std::size_t index);
+    void ApplyConfiguredShader();
+    void ApplyShaderHotkey(int hotkey, bool persist = true);
+    void ApplyShaderPreset(std::size_t index, bool persist = true);
+    void PersistShaderPreset(std::size_t index);
     void OpenCustomShaders();
     void ShowError(QString title, std::string_view detail);
     void LogHardwareInformation();
@@ -257,10 +263,13 @@ private:
     bool statisticsVisible_{false};
     bool feedbackVisible_{false};
     bool playbackStateAvailable_{true};
+    bool resumeEnabled_{true};
     bool resumeSaveSuspended_{false};
+    bool resumePromptWasPlaying_{false};
     bool settingsDirty_{false};
     bool timelineDragging_{false};
     std::optional<int> pendingTimelineValue_;
+    std::optional<double> pendingResumePosition_;
     std::chrono::steady_clock::time_point pendingTimelineStarted_{};
     bool fullscreen_{false};
     bool backgroundTest_{false};

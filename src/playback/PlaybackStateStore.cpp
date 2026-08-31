@@ -152,6 +152,12 @@ bool PlaybackStateStore::Remove(std::string_view key) {
     return entries_.erase(std::string(key)) != 0;
 }
 
+bool PlaybackStateStore::Clear() noexcept {
+    if (entries_.empty()) return false;
+    entries_.clear();
+    return true;
+}
+
 std::size_t PlaybackStateStore::Size() const noexcept {
     return entries_.size();
 }

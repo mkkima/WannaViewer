@@ -110,6 +110,10 @@ QString DisplayLabel(std::string_view value, const char* fallback) {
     return value.empty() ? QString::fromUtf8(fallback) : ToQString(value);
 }
 
+QString SettingChoice(bool active, QString label) {
+    return (active ? QStringLiteral("✓  ") : QStringLiteral("    ")) + std::move(label);
+}
+
 std::string PlaybackIdentity(std::string_view value) {
     if (const auto parsed = Url::Parse(value)) return "url\n" + parsed->Value();
     std::error_code error;
@@ -530,15 +534,25 @@ QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger,
                      (!backgroundTest && config_.GetBool("ui.animations", true) && SystemAnimationsEnabled())),
       motionTest_(motionTest) {
     shaders_.Reload();
-    if (config_.GetBool("playback.resume", true)) {
+    const auto configuredShader = config_.GetString("shader.preset", "off");
+    if (const auto* preset = shaders_.Find(configuredShader)) {
+        const auto iterator = std::ranges::find_if(shaders_.Presets(), [preset](const ShaderPreset& item) {
+            return item.id == preset->id;
+        });
+        shaderPresetIndex_ = iterator == shaders_.Presets().end()
+            ? 0U : static_cast<std::size_t>(std::distance(shaders_.Presets().begin(), iterator));
+    } else {
+        logger_.Write(LogLevel::Error, "config", "unknown shader preset; using off");
+    }
+    resumeEnabled_ = config_.GetBool("playback.resume", true);
+    if (resumeEnabled_) {
         try {
             playbackState_ = PlaybackStateStore::Load(paths_.config / "playback-state.json");
         } catch (const std::exception& error) {
             playbackStateAvailable_ = false;
+            resumeEnabled_ = false;
             logger_.Write(LogLevel::Error, "playback", std::string("resume state disabled: ") + error.what());
         }
-    } else {
-        playbackStateAvailable_ = false;
     }
     resolvers_.Add(std::make_unique<DirectMediaResolver>());
     resolvers_.Add(std::make_unique<AnimeGoResolver>());
@@ -820,6 +834,10 @@ void QtPlayerWindow::ConnectUi() {
     connect(overlaySecondary_, &QPushButton::clicked, this, [this] { HideOverlay(); });
     connect(overlayEdit_, &QLineEdit::returnPressed, this, [this] { ApplyOverlaySelection(); });
     connect(overlayList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) { ApplyOverlaySelection(); });
+    connect(overlayList_, &QListWidget::currentRowChanged, this, [this](int row) {
+        if (overlayAction_ == OverlayAction::Resume)
+            overlayPrimary_->setText(row == 1 ? QStringLiteral("Start over") : QStringLiteral("Continue"));
+    });
     connect(sourceCancel_, &QPushButton::clicked, this, [this] { HideSourceSelector(); });
     connect(sourceOpen_, &QPushButton::clicked, this, [this] { OpenSelectedSource(); });
     connect(sourceSeason_, &QComboBox::currentIndexChanged, this, [this](int value) {
@@ -1153,6 +1171,31 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 21:
             value = !currentResumeKey_.empty() && playbackState_.Find(currentResumeKey_).has_value();
             break;
+        case 22:
+            value = overlayMode_ == OverlayMode::Choice && overlayAction_ == OverlayAction::Resume &&
+                    pendingResumePosition_.has_value() && overlay_->isVisible();
+            break;
+        case 23:
+            value = overlayMode_ == OverlayMode::Choice && overlayAction_ == OverlayAction::Settings &&
+                    overlay_->isVisible();
+            break;
+        case 24: {
+            int active = 0;
+            for (int index = 0; index < overlayList_->count(); ++index) {
+                if (overlayList_->item(index)->text().startsWith(QStringLiteral("✓"))) ++active;
+            }
+            *result = (overlayList_->count() << 8) | active;
+            return true;
+        }
+        case 25:
+            value = resumeEnabled_;
+            break;
+        case 26:
+            value = config_.GetBool("ui.animations", true);
+            break;
+        case 27:
+            *result = static_cast<qintptr>(shaderPresetIndex_);
+            return true;
         default:
             break;
         }
@@ -1273,6 +1316,47 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             break;
         case 19:
             volume_->setValue(37);
+            break;
+        case 20:
+            if (overlayAction_ != OverlayAction::Resume) { *result = 0; return true; }
+            overlayList_->setCurrentRow(0);
+            ApplyOverlaySelection();
+            break;
+        case 21:
+            if (overlayAction_ != OverlayAction::Resume) { *result = 0; return true; }
+            overlayList_->setCurrentRow(1);
+            ApplyOverlaySelection();
+            break;
+        case 22:
+            ShowSettingsMenu();
+            break;
+        case 23:
+            ShowSettingsMenu();
+            overlayList_->setCurrentRow(8);
+            ApplyOverlaySelection();
+            break;
+        case 24:
+            ShowSettingsMenu();
+            overlayList_->setCurrentRow(7);
+            ApplyOverlaySelection();
+            break;
+        case 25:
+            ShowSettingsMenu();
+            overlayList_->setCurrentRow(10);
+            ApplyOverlaySelection();
+            break;
+        case 26:
+            ShowSettingsMenu();
+            overlayList_->setCurrentRow(9);
+            ApplyOverlaySelection();
+            break;
+        case 27:
+            ShowSettingsMenu();
+            overlayList_->setCurrentRow(11);
+            ApplyOverlaySelection();
+            break;
+        case 28:
+            ApplyShaderPreset(1);
             break;
         default: *result = 0; return true;
         }
@@ -1454,6 +1538,7 @@ void QtPlayerWindow::HandleEngineInitialized() {
     engineReady_ = true;
     try {
         if (engine_.UsesOpenGlRenderApi()) videoSurface_->AttachEngine(engine_);
+        ApplyConfiguredShader();
     } catch (const std::exception& rendererError) {
         logger_.Write(LogLevel::Error, "playback", std::string("OpenGL renderer initialization failed: ") +
                                                      rendererError.what());
@@ -1498,7 +1583,7 @@ void QtPlayerWindow::OpenMedia(std::string value,
                                std::string resumeIdentity) {
     SavePlaybackProgress();
     resumeSaveSuspended_ = true;
-    pendingResumeKey_ = playbackStateAvailable_ && !benchmarkMode_
+    pendingResumeKey_ = playbackStateAvailable_ && resumeEnabled_ && !benchmarkMode_
         ? PlaybackStateKey(resumeIdentity.empty() ? PlaybackIdentity(value) : resumeIdentity)
         : std::string{};
     if (sourceSelection_) HideSourceSelector();
@@ -1870,7 +1955,7 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         RestorePlaybackProgress();
         setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark buffering")
                                       : QStringLiteral("WannaViewer — buffering…"));
-        if (benchmarkMode_ && benchmarkProfile_ == "hardware-shader") ApplyShaderHotkey(2);
+        if (benchmarkMode_ && benchmarkProfile_ == "hardware-shader") ApplyShaderHotkey(2, false);
         break;
     case PlaybackEventType::PlaybackStarted:
         logger_.Write(LogLevel::Info, "playback", "playback clock advanced");
@@ -2116,20 +2201,57 @@ void QtPlayerWindow::UpdateControlStates() {
 }
 
 void QtPlayerWindow::RestorePlaybackProgress() {
-    if (!playbackStateAvailable_ || benchmarkMode_ || currentResumeKey_.empty() || !mediaLoaded_) return;
+    if (!playbackStateAvailable_ || !resumeEnabled_ || benchmarkMode_ ||
+        currentResumeKey_.empty() || !mediaLoaded_) return;
     const double duration = engine_.Duration();
     const auto position = playbackState_.ResumePosition(currentResumeKey_, duration);
     if (!position) return;
-    pendingTimelineValue_ = duration > 0.0
-        ? static_cast<int>(std::lround(std::clamp(*position / duration, 0.0, 1.0) * 10000.0)) : 0;
-    pendingTimelineStarted_ = std::chrono::steady_clock::now();
-    engine_.SeekAbsolute(*position);
-    ShowPlaybackFeedback(QStringLiteral("Resumed  ·  %1").arg(TimeText(*position)));
-    logger_.Write(LogLevel::Info, "playback", std::format("resumed at {:.1f} seconds", *position));
+    pendingResumePosition_ = position;
+    resumePromptWasPlaying_ = !engine_.IsPaused();
+    if (resumePromptWasPlaying_) engine_.SetPaused(true);
+    ShowChoiceOverlay(QStringLiteral("Resume playback"),
+                      QStringLiteral("A saved position is available for this video"),
+                      {QStringLiteral("Continue from %1").arg(TimeText(*position)),
+                       QStringLiteral("Start from the beginning")},
+                      0, OverlayAction::Resume);
+    overlaySecondary_->hide();
+}
+
+void QtPlayerWindow::CompleteResumePrompt(bool resume) {
+    if (!pendingResumePosition_) return;
+    const double position = *pendingResumePosition_;
+    const bool restorePlaying = resumePromptWasPlaying_;
+    pendingResumePosition_.reset();
+    resumePromptWasPlaying_ = false;
+    overlayAction_ = OverlayAction::None;
+    HideOverlay();
+    if (resume) {
+        const double duration = engine_.Duration();
+        pendingTimelineValue_ = duration > 0.0
+            ? static_cast<int>(std::lround(std::clamp(position / duration, 0.0, 1.0) * 10000.0)) : 0;
+        pendingTimelineStarted_ = std::chrono::steady_clock::now();
+        engine_.SeekAbsolute(position);
+        ShowPlaybackFeedback(QStringLiteral("Resumed  ·  %1").arg(TimeText(position)));
+        logger_.Write(LogLevel::Info, "playback", std::format("resumed at {:.1f} seconds", position));
+    } else {
+        pendingTimelineValue_ = 0;
+        pendingTimelineStarted_ = std::chrono::steady_clock::now();
+        engine_.SeekAbsolute(0.0);
+        const bool saved = !playbackState_.Remove(currentResumeKey_) || PersistPlaybackState();
+        if (saved) {
+            ShowPlaybackFeedback(QStringLiteral("Started from the beginning"));
+            logger_.Write(LogLevel::Info, "playback", "saved position discarded for current media");
+        } else {
+            ShowError(QStringLiteral("Resume"),
+                      "The saved position could not be updated and may appear again after restart");
+        }
+    }
+    if (restorePlaying) engine_.SetPaused(false);
 }
 
 void QtPlayerWindow::SavePlaybackProgress(bool completed) {
-    if (!playbackStateAvailable_ || benchmarkMode_ || resumeSaveSuspended_ || currentResumeKey_.empty()) return;
+    if (!playbackStateAvailable_ || !resumeEnabled_ || benchmarkMode_ ||
+        resumeSaveSuspended_ || currentResumeKey_.empty()) return;
     bool changed = false;
     if (completed) {
         changed = playbackState_.Remove(currentResumeKey_);
@@ -2144,11 +2266,37 @@ void QtPlayerWindow::SavePlaybackProgress(bool completed) {
         }
     }
     if (!changed) return;
+    (void)PersistPlaybackState();
+}
+
+bool QtPlayerWindow::PersistPlaybackState() {
     try {
         playbackState_.Save(paths_.config / "playback-state.json");
+        return true;
     } catch (const std::exception& error) {
         logger_.Write(LogLevel::Error, "playback", std::string("unable to save resume state: ") + error.what());
+        return false;
     }
+}
+
+void QtPlayerWindow::SetResumeEnabled(bool enabled) {
+    if (enabled == resumeEnabled_) return;
+    if (enabled) {
+        playbackState_ = PlaybackStateStore::Load(paths_.config / "playback-state.json");
+        playbackStateAvailable_ = true;
+    }
+    config_.Set("playback.resume", enabled ? "true" : "false");
+    config_.Save(paths_.config / "player.conf");
+    resumeEnabled_ = enabled;
+}
+
+void QtPlayerWindow::ClearPlaybackHistory() {
+    (void)playbackState_.Clear();
+    playbackState_.Save(paths_.config / "playback-state.json");
+    playbackStateAvailable_ = true;
+    currentResumeKey_.clear();
+    pendingResumeKey_.clear();
+    if (config_.GetBool("playback.resume", true)) resumeEnabled_ = true;
 }
 
 void QtPlayerWindow::SaveUserSettings() {
@@ -2287,14 +2435,24 @@ void QtPlayerWindow::ShowShaderMenu() {
 }
 
 void QtPlayerWindow::ShowSettingsMenu() {
+    const auto cache = config_.GetString("network.cache_mode", "balanced");
+    const auto hardware = config_.GetString("playback.hwdec", "auto");
+    const auto pacing = config_.GetString("playback.video_sync", "display-resample");
+    const bool animations = config_.GetBool("ui.animations", true);
+    const int selected = cache == "low-latency" ? 0 : cache == "unstable" ? 2 : 1;
     ShowChoiceOverlay(QStringLiteral("Playback settings"), QStringLiteral("Choose a setting to apply"),
-                      {QStringLiteral("Network cache  ·  Low latency"),
-                       QStringLiteral("Network cache  ·  Balanced"),
-                       QStringLiteral("Network cache  ·  Unstable connection"),
-                       QStringLiteral("Hardware decoding  ·  Auto"),
-                       QStringLiteral("Hardware decoding  ·  Off"),
-                       QStringLiteral("Frame pacing  ·  Display resample"),
-                       QStringLiteral("Frame pacing  ·  Audio clock")}, -1, OverlayAction::Settings);
+                      {SettingChoice(cache == "low-latency", QStringLiteral("Network cache  ·  Low latency")),
+                       SettingChoice(cache != "low-latency" && cache != "unstable", QStringLiteral("Network cache  ·  Balanced")),
+                       SettingChoice(cache == "unstable", QStringLiteral("Network cache  ·  Unstable connection")),
+                       SettingChoice(hardware != "no", QStringLiteral("Hardware decoding  ·  Auto")),
+                       SettingChoice(hardware == "no", QStringLiteral("Hardware decoding  ·  Off")),
+                       SettingChoice(pacing != "audio", QStringLiteral("Frame pacing  ·  Display resample")),
+                       SettingChoice(pacing == "audio", QStringLiteral("Frame pacing  ·  Audio clock")),
+                       SettingChoice(resumeEnabled_, QStringLiteral("Resume playback  ·  On")),
+                       SettingChoice(!resumeEnabled_, QStringLiteral("Resume playback  ·  Off")),
+                       SettingChoice(animations, QStringLiteral("Interface animations  ·  On (next launch)")),
+                       SettingChoice(!animations, QStringLiteral("Interface animations  ·  Off (next launch)")),
+                       QStringLiteral("Clear saved playback positions")}, selected, OverlayAction::Settings);
 }
 
 void QtPlayerWindow::ShowChoiceOverlay(QString title, QString hint, std::vector<QString> choices,
@@ -2337,6 +2495,10 @@ void QtPlayerWindow::ShowMessageOverlay(QString title, QString detail) {
 }
 
 void QtPlayerWindow::HideOverlay() {
+    if (overlayAction_ == OverlayAction::Resume && pendingResumePosition_) {
+        CompleteResumePrompt(true);
+        return;
+    }
     overlayMode_ = OverlayMode::None;
     overlayAction_ = OverlayAction::None;
     overlayChoices_.clear();
@@ -2358,6 +2520,10 @@ void QtPlayerWindow::ApplyOverlaySelection() {
     const int selected = overlayList_->currentRow();
     if (selected < 0 || static_cast<std::size_t>(selected) >= overlayChoices_.size()) return;
     const auto action = overlayAction_;
+    if (action == OverlayAction::Resume) {
+        CompleteResumePrompt(selected == 0);
+        return;
+    }
     HideOverlay();
     try {
         if (action == OverlayAction::Audio && static_cast<std::size_t>(selected) < audioTrackIds_.size()) {
@@ -2397,13 +2563,44 @@ void QtPlayerWindow::ApplyOverlaySelection() {
             config_.Save(paths_.config / "player.conf");
             ShowPlaybackFeedback(selected == 5 ? QStringLiteral("Frame pacing  ·  Display resample")
                                                : QStringLiteral("Frame pacing  ·  Audio clock"));
+        } else if (action == OverlayAction::Settings && (selected == 7 || selected == 8)) {
+            const bool enabled = selected == 7;
+            SetResumeEnabled(enabled);
+            ShowPlaybackFeedback(enabled ? QStringLiteral("Resume playback  ·  On")
+                                         : QStringLiteral("Resume playback  ·  Off"));
+        } else if (action == OverlayAction::Settings && (selected == 9 || selected == 10)) {
+            const bool enabled = selected == 9;
+            config_.Set("ui.animations", enabled ? "true" : "false");
+            config_.Save(paths_.config / "player.conf");
+            ShowPlaybackFeedback(enabled ? QStringLiteral("Animations on after restart")
+                                         : QStringLiteral("Animations off after restart"));
+        } else if (action == OverlayAction::Settings && selected == 11) {
+            ClearPlaybackHistory();
+            ShowPlaybackFeedback(QStringLiteral("Playback history cleared"));
         }
     } catch (const std::exception& error) {
         ShowError(QStringLiteral("Action failed"), error.what());
     }
 }
 
-void QtPlayerWindow::ApplyShaderHotkey(int hotkey) {
+void QtPlayerWindow::ApplyConfiguredShader() {
+    if (shaderPresetIndex_ == 0 || shaderPresetIndex_ >= shaders_.Presets().size()) return;
+    try {
+        engine_.SetShaders(shaders_.Resolve(shaders_.Presets()[shaderPresetIndex_]));
+    } catch (const std::exception& error) {
+        shaderPresetIndex_ = 0;
+        engine_.SetShaders({});
+        logger_.Write(LogLevel::Error, "shader", std::string("unable to restore shader preset: ") + error.what());
+    }
+}
+
+void QtPlayerWindow::PersistShaderPreset(std::size_t index) {
+    if (index >= shaders_.Presets().size()) return;
+    config_.Set("shader.preset", shaders_.Presets()[index].id);
+    config_.Save(paths_.config / "player.conf");
+}
+
+void QtPlayerWindow::ApplyShaderHotkey(int hotkey, bool persist) {
     if (!mediaLoaded_) return;
     const auto* preset = shaders_.ForHotkey(hotkey);
     if (!preset) return;
@@ -2421,10 +2618,18 @@ void QtPlayerWindow::ApplyShaderHotkey(int hotkey) {
         shaderPresetIndex_ = 0;
         UpdateControlStates();
         ShowError(QStringLiteral("Shader"), error.what());
+        return;
+    }
+    if (persist) {
+        try {
+            PersistShaderPreset(shaderPresetIndex_);
+        } catch (const std::exception& error) {
+            ShowError(QStringLiteral("Settings"), error.what());
+        }
     }
 }
 
-void QtPlayerWindow::ApplyShaderPreset(std::size_t index) {
+void QtPlayerWindow::ApplyShaderPreset(std::size_t index, bool persist) {
     if (index == shaders_.Presets().size()) { OpenCustomShaders(); return; }
     if (index >= shaders_.Presets().size()) return;
     try {
@@ -2437,6 +2642,14 @@ void QtPlayerWindow::ApplyShaderPreset(std::size_t index) {
         shaderPresetIndex_ = 0;
         UpdateControlStates();
         ShowError(QStringLiteral("Shader"), error.what());
+        return;
+    }
+    if (persist) {
+        try {
+            PersistShaderPreset(shaderPresetIndex_);
+        } catch (const std::exception& error) {
+            ShowError(QStringLiteral("Settings"), error.what());
+        }
     }
 }
 
@@ -2459,7 +2672,14 @@ void QtPlayerWindow::OpenCustomShaders() {
         engine_.SetShaders(imported);
         shaderPresetIndex_ = shaders_.Presets().size();
         UpdateControlStates();
-        ShowPlaybackFeedback(QStringLiteral("Shaders  ·  Custom"));
+        try {
+            config_.Set("shader.preset", "off");
+            config_.Save(paths_.config / "player.conf");
+        } catch (const std::exception& error) {
+            ShowError(QStringLiteral("Settings"), error.what());
+            return;
+        }
+        ShowPlaybackFeedback(QStringLiteral("Shaders  ·  Custom (this session)"));
     } catch (const std::exception& error) {
         engine_.SetShaders({});
         shaderPresetIndex_ = 0;

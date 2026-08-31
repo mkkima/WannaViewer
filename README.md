@@ -30,7 +30,10 @@ Set `ui.animations=false` in `config/player.conf` to disable interface motion;
 the Windows shell also honors the operating-system client-animation setting.
 Playback volume and resumable positions are saved automatically. Set
 `playback.resume=false` to disable position history; nearly completed videos
-and live streams are never resumed.
+and live streams are never resumed. When a saved position exists, the player
+asks whether to continue or start from the beginning. Playback settings show
+their active values and can clear the saved position history. Named shader
+presets are restored on the next launch; custom shader chains remain session-only.
 
 Drop a media file onto the window, use **Ctrl+O**, or pass a file/direct URL on
 the command line. Use **Ctrl+U** for a URL. Controls disappear while playing.

@@ -289,6 +289,12 @@ void MpvEngine::Open(std::string_view pathOrUrl, const std::vector<std::pair<std
 
 void MpvEngine::Stop() { Command({"stop"}); }
 
+void MpvEngine::SetPaused(bool paused) {
+    if (!initialized_.load(std::memory_order_acquire)) return;
+    int value = paused ? 1 : 0;
+    (void)api_.SetProperty(handle_, "pause", MPV_FORMAT_FLAG, &value);
+}
+
 void MpvEngine::TogglePause() { Command({"cycle", "pause"}); }
 void MpvEngine::ToggleMute() { Command({"cycle", "mute"}); }
 void MpvEngine::SeekRelative(double seconds) { Command({"seek", std::format("{:.3f}", seconds), "relative+exact"}); }

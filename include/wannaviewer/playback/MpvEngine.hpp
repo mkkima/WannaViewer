@@ -67,6 +67,7 @@ public:
     void Open(std::string_view pathOrUrl, const std::vector<std::pair<std::string, std::string>>& headers = {},
               std::string_view externalAudioUrl = {});
     void Stop();
+    void SetPaused(bool paused);
     void TogglePause();
     void ToggleMute();
     void SeekRelative(double seconds);

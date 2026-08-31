@@ -37,6 +37,10 @@ WV_TEST("playback state round-trips resumable positions") {
     WV_REQUIRE(progress->positionSeconds == 322.5);
     WV_REQUIRE(progress->durationSeconds == 1200.0);
     WV_REQUIRE(loaded.ResumePosition(StateKey('a'), 1200.0) == std::optional<double>(322.5));
+    auto cleared = loaded;
+    WV_REQUIRE(cleared.Clear());
+    WV_REQUIRE(cleared.Size() == 0);
+    WV_REQUIRE(!cleared.Clear());
 
     std::error_code error;
     std::filesystem::remove(path, error);

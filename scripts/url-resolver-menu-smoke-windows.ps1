@@ -2,6 +2,7 @@
 param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
     [switch]$VerifyYummyPlayback,
+    [switch]$VerifyRecentReplay,
     [switch]$Interactive,
     [string]$CapturePath,
     [string[]]$Urls = @(
@@ -154,6 +155,48 @@ foreach ($url in $Urls) {
         Invoke-UiAction $window 5
         if (-not $process.WaitForExit(10000)) { throw 'Qt player did not close cleanly' }
         if ($process.ExitCode -ne 0) { throw "Qt player exited with code $($process.ExitCode)" }
+    } finally {
+        if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    }
+}
+
+if ($VerifyRecentReplay) {
+    if (-not $VerifyYummyPlayback) {
+        throw '-VerifyRecentReplay requires -VerifyYummyPlayback so a successfully played page is available'
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new($playerPath)
+    $start.UseShellExecute = $false
+    $start.ArgumentList.Add('--background-render-test')
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        [void]$process.WaitForInputIdle(10000)
+        $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            Start-Sleep -Milliseconds 50
+            $process.Refresh()
+            $window = Find-PlayerWindow $process.Id
+        } while ($window -eq [IntPtr]::Zero -and -not $process.HasExited -and
+                 [DateTime]::UtcNow -lt $windowDeadline)
+        if ($process.HasExited -or $window -eq [IntPtr]::Zero) {
+            throw 'Qt player did not start for recent page replay'
+        }
+        if ((Get-UiValue $window 28) -lt 1 -or (Get-UiValue $window 29) -ne 1) {
+            throw 'The successfully played page is not available in recent media'
+        }
+        Invoke-UiAction $window 29
+        $playbackDeadline = [DateTime]::UtcNow.AddSeconds(90)
+        do {
+            if ((Get-UiValue $window 5) -eq 1 -and (Get-UiValue $window 10) -eq 1) { break }
+            Start-Sleep -Milliseconds 100
+            $process.Refresh()
+        } while (-not $process.HasExited -and [DateTime]::UtcNow -lt $playbackDeadline)
+        if ($process.HasExited -or (Get-UiValue $window 5) -ne 1 -or (Get-UiValue $window 10) -ne 1) {
+            throw 'Recent page replay did not resolve the saved episode/provider to a visible frame'
+        }
+        Invoke-UiAction $window 5
+        if (-not $process.WaitForExit(10000)) { throw 'Qt player did not close after recent page replay' }
+        if ($process.ExitCode -ne 0) { throw "Qt player replay exited with code $($process.ExitCode)" }
+        Write-Host 'Recent page entry resolved again and produced a visible OpenGL playback frame.'
     } finally {
         if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     }

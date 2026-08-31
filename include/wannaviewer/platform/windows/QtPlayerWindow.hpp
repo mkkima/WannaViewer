@@ -10,6 +10,7 @@
 #include "wannaviewer/network/YtDlpBridge.hpp"
 #include "wannaviewer/playback/MpvEngine.hpp"
 #include "wannaviewer/playback/PlaybackStateStore.hpp"
+#include "wannaviewer/playback/RecentMediaStore.hpp"
 #include "wannaviewer/rendering/ShaderManager.hpp"
 
 #include <QWidget>
@@ -95,6 +96,7 @@ private:
                    std::vector<std::pair<std::string, std::string>> headers,
                    std::string externalAudioUrl,
                    std::string resumeIdentity);
+    void OpenLocalFile(std::string path);
     void OpenFileDialog();
     void ShowUrlOverlay();
     void ResolveUrl(std::string value, HeaderMap inheritedHeaders = {}, bool preserveResumeIdentity = false);
@@ -107,7 +109,8 @@ private:
     void PopulateSourceStreams();
     void UpdateSourceSelectionUi();
     [[nodiscard]] const StreamVariant* SelectedSource() const;
-    [[nodiscard]] std::string SelectedSourceResumeIdentity() const;
+    void PrepareSelectedRecent(const ResolveResult& result, int seasonIndex, int voiceIndex,
+                               int episodeIndex, int streamIndex);
     void OpenSelectedSource();
     void OpenVariant(const StreamVariant& stream);
     bool RetryBrowserProvider();
@@ -131,6 +134,13 @@ private:
     [[nodiscard]] bool PersistPlaybackState();
     void SetResumeEnabled(bool enabled);
     void ClearPlaybackHistory();
+    void RefreshRecentMedia();
+    void UpdateRecentActions();
+    void OpenSelectedRecent();
+    void RemoveSelectedRecent();
+    void ClearRecentMedia();
+    void CommitPendingRecent();
+    [[nodiscard]] bool PersistRecentMedia();
     void SaveUserSettings();
     void RecordInteraction();
     void ShowControls(bool show, bool animated = true);
@@ -165,6 +175,7 @@ private:
     ResolverPipeline resolvers_;
     MpvEngine engine_;
     PlaybackStateStore playbackState_;
+    RecentMediaStore recentMedia_;
 
     MpvVideoWidget* videoSurface_{nullptr};
     QFrame* controls_{nullptr};
@@ -196,6 +207,11 @@ private:
     QPushButton* emptyPlayIcon_{nullptr};
     QPushButton* openFileButton_{nullptr};
     QPushButton* openUrlButton_{nullptr};
+    QLabel* recentTitle_{nullptr};
+    QListWidget* recentList_{nullptr};
+    QPushButton* recentOpen_{nullptr};
+    QPushButton* recentRemove_{nullptr};
+    QPushButton* recentClear_{nullptr};
     QFrame* openingState_{nullptr};
     QLabel* openingTitle_{nullptr};
     QLabel* openingStatus_{nullptr};
@@ -263,6 +279,8 @@ private:
     bool statisticsVisible_{false};
     bool feedbackVisible_{false};
     bool playbackStateAvailable_{true};
+    bool recentMediaAvailable_{true};
+    bool recentReplaySourceMatched_{false};
     bool resumeEnabled_{true};
     bool resumeSaveSuspended_{false};
     bool resumePromptWasPlaying_{false};
@@ -285,6 +303,9 @@ private:
     std::string pendingResumeIdentity_;
     std::string pendingResumeKey_;
     std::string currentResumeKey_;
+    std::string pendingRecentOpenValue_;
+    std::optional<RecentMediaEntry> pendingRecentEntry_;
+    std::optional<RecentMediaEntry> recentReplayEntry_;
     HeaderMap browserRetryHeaders_;
     unsigned browserRetriesRemaining_{0};
     std::chrono::steady_clock::time_point playbackLoadStarted_{};

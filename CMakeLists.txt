@@ -33,6 +33,7 @@ set(WANNAVIEWER_COMMON_SOURCES
   src/playback/MpvApi.cpp
   src/playback/MpvEngine.cpp
   src/playback/PlaybackStateStore.cpp
+  src/playback/RecentMediaStore.cpp
   src/playback/PlaybackStatistics.cpp
   src/rendering/ShaderManager.cpp
   src/ui/ControlLayout.cpp
@@ -153,6 +154,7 @@ if(WANNAVIEWER_BUILD_TESTS)
     tests/ConfigTests.cpp
     tests/ControlLayoutTests.cpp
     tests/PlaybackStateStoreTests.cpp
+    tests/RecentMediaStoreTests.cpp
     tests/ResolverTests.cpp
     tests/SecurityTests.cpp
     tests/ShaderManagerTests.cpp

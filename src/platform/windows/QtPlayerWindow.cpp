@@ -117,7 +117,7 @@ QString SettingChoice(bool active, QString label) {
 std::string PlaybackIdentity(std::string_view value) {
     if (const auto parsed = Url::Parse(value)) return "url\n" + parsed->Value();
     std::error_code error;
-    const std::filesystem::path path(value);
+    const std::filesystem::path path(ToQString(value).toStdWString());
     if (std::filesystem::is_regular_file(path, error) && !error) {
         auto canonical = std::filesystem::weakly_canonical(path, error);
         if (error) {
@@ -144,6 +144,74 @@ std::string PlaybackIdentity(std::string_view value) {
 std::string PlaybackStateKey(std::string_view identity) {
     const QByteArray bytes(identity.data(), static_cast<qsizetype>(identity.size()));
     return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString();
+}
+
+struct StreamLocation final {
+    int season{-1};
+    int voice{-1};
+    int episode{-1};
+    int stream{-1};
+};
+
+std::vector<StreamLocation> StreamLocations(const ResolveResult& result) {
+    std::vector<StreamLocation> locations;
+    for (std::size_t seasonIndex = 0; seasonIndex < result.entry.seasons.size(); ++seasonIndex) {
+        const auto& season = result.entry.seasons[seasonIndex];
+        for (std::size_t voiceIndex = 0; voiceIndex < season.voiceTracks.size(); ++voiceIndex) {
+            const auto& voice = season.voiceTracks[voiceIndex];
+            for (std::size_t episodeIndex = 0; episodeIndex < voice.episodes.size(); ++episodeIndex) {
+                const auto& episode = voice.episodes[episodeIndex];
+                for (std::size_t streamIndex = 0; streamIndex < episode.streams.size(); ++streamIndex) {
+                    locations.push_back({static_cast<int>(seasonIndex), static_cast<int>(voiceIndex),
+                                         static_cast<int>(episodeIndex), static_cast<int>(streamIndex)});
+                }
+            }
+        }
+    }
+    return locations;
+}
+
+const StreamVariant* StreamAt(const ResolveResult& result, const StreamLocation& location) {
+    if (location.season < 0 || location.voice < 0 || location.episode < 0 || location.stream < 0) return nullptr;
+    const auto& seasons = result.entry.seasons;
+    if (static_cast<std::size_t>(location.season) >= seasons.size()) return nullptr;
+    const auto& voices = seasons[static_cast<std::size_t>(location.season)].voiceTracks;
+    if (static_cast<std::size_t>(location.voice) >= voices.size()) return nullptr;
+    const auto& episodes = voices[static_cast<std::size_t>(location.voice)].episodes;
+    if (static_cast<std::size_t>(location.episode) >= episodes.size()) return nullptr;
+    const auto& streams = episodes[static_cast<std::size_t>(location.episode)].streams;
+    return static_cast<std::size_t>(location.stream) < streams.size()
+        ? &streams[static_cast<std::size_t>(location.stream)] : nullptr;
+}
+
+std::optional<StreamLocation> FindRecentLocation(const ResolveResult& result,
+                                                  const RecentMediaSelection& wanted) {
+    const auto match = MatchRecentMediaSelection(result.entry, wanted);
+    return match ? std::optional<StreamLocation>(StreamLocation{
+        static_cast<int>(match->season), static_cast<int>(match->voice),
+        static_cast<int>(match->episode), static_cast<int>(match->stream)}) : std::nullopt;
+}
+
+std::optional<StreamLocation> FindPreferredStream(const ResolveResult& result,
+                                                   const RecentMediaSelection& wanted) {
+    std::optional<StreamLocation> best;
+    int bestScore = -1;
+    for (const auto& location : StreamLocations(result)) {
+        const auto* stream = StreamAt(result, location);
+        if (!stream || stream->protectedStream) continue;
+        int score = 0;
+        if (!wanted.quality.empty() && stream->quality == wanted.quality) score += 2;
+        if (!wanted.protocol.empty() && stream->protocol == wanted.protocol) score += 1;
+        if (score > bestScore) {
+            best = location;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
+std::string ComponentIdentity(const std::string& id, const std::string& title) {
+    return id.empty() ? title : id;
 }
 
 enum class Glyph {
@@ -554,6 +622,12 @@ QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger,
             logger_.Write(LogLevel::Error, "playback", std::string("resume state disabled: ") + error.what());
         }
     }
+    try {
+        recentMedia_ = RecentMediaStore::Load(paths_.config / "recent-media.json");
+    } catch (const std::exception& error) {
+        recentMediaAvailable_ = false;
+        logger_.Write(LogLevel::Error, "playback", std::string("recent media disabled: ") + error.what());
+    }
     resolvers_.Add(std::make_unique<DirectMediaResolver>());
     resolvers_.Add(std::make_unique<AnimeGoResolver>());
     resolvers_.Add(std::make_unique<BrowserEmbedResolver>(paths_.cache / "webview2"));
@@ -667,9 +741,29 @@ void QtPlayerWindow::BuildUi() {
     auto* emptyButtons = new QHBoxLayout();
     emptyButtons->setSpacing(10);
     emptyButtons->addWidget(openFileButton_); emptyButtons->addWidget(openUrlButton_);
+    recentTitle_ = new QLabel(QStringLiteral("Recent"), emptyState_);
+    recentTitle_->setObjectName(QStringLiteral("recentTitle"));
+    recentList_ = new QListWidget(emptyState_);
+    recentList_->setObjectName(QStringLiteral("recentList"));
+    recentList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    recentList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    recentOpen_ = new QPushButton(QStringLiteral("Open"), emptyState_);
+    recentOpen_->setObjectName(QStringLiteral("primaryButton"));
+    recentRemove_ = new QPushButton(QStringLiteral("Remove"), emptyState_);
+    recentClear_ = new QPushButton(QStringLiteral("Clear recent"), emptyState_);
+    auto* recentButtons = new QHBoxLayout();
+    recentButtons->setSpacing(8);
+    recentButtons->addWidget(recentOpen_);
+    recentButtons->addWidget(recentRemove_);
+    recentButtons->addStretch(1);
+    recentButtons->addWidget(recentClear_);
     emptyLayout->addWidget(emptyPlayIcon_, 0, Qt::AlignHCenter);
     emptyLayout->addWidget(emptyTitle); emptyLayout->addWidget(emptyHint); emptyLayout->addSpacing(8);
     emptyLayout->addLayout(emptyButtons);
+    emptyLayout->addSpacing(7);
+    emptyLayout->addWidget(recentTitle_);
+    emptyLayout->addWidget(recentList_, 1);
+    emptyLayout->addLayout(recentButtons);
 
     openingState_ = new QFrame(this);
     openingState_->setObjectName(QStringLiteral("openingState"));
@@ -802,6 +896,7 @@ void QtPlayerWindow::BuildUi() {
     uiTimer_->setInterval(kUiIntervalMs);
     uiTimer_->setTimerType(Qt::PreciseTimer);
     LayoutOverlays();
+    RefreshRecentMedia();
     UpdateVisibility();
 }
 
@@ -809,6 +904,13 @@ void QtPlayerWindow::ConnectUi() {
     connect(openFileButton_, &QPushButton::clicked, this, [this] { OpenFileDialog(); });
     connect(emptyPlayIcon_, &QPushButton::clicked, this, [this] { OpenFileDialog(); });
     connect(openUrlButton_, &QPushButton::clicked, this, [this] { ShowUrlOverlay(); });
+    connect(recentOpen_, &QPushButton::clicked, this, [this] { OpenSelectedRecent(); });
+    connect(recentRemove_, &QPushButton::clicked, this, [this] { RemoveSelectedRecent(); });
+    connect(recentClear_, &QPushButton::clicked, this, [this] { ClearRecentMedia(); });
+    connect(recentList_, &QListWidget::currentRowChanged, this, [this](int) { UpdateRecentActions(); });
+    connect(recentList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem*) {
+        OpenSelectedRecent();
+    });
     connect(playButton_, &QPushButton::clicked, this, [this] { TogglePlayback(); });
     connect(rewindButton_, &QPushButton::clicked, this, [this] { SeekRelative(-10.0); });
     connect(forwardButton_, &QPushButton::clicked, this, [this] { SeekRelative(10.0); });
@@ -894,6 +996,7 @@ void QtPlayerWindow::ApplyTheme() {
         QPushButton#primaryButton:hover { background: #ffffff; }
         QPushButton#emptyPlay { padding: 0; border-radius: 29px; background: #17171b; border-color: #424248; }
         QLabel#emptyTitle, QLabel#panelTitle { font-size: 24px; font-weight: 600; }
+        QLabel#recentTitle { font-size: 16px; font-weight: 600; }
         QLabel#mutedText { color: #a2a2aa; }
         QLabel#timeLabel { color: #ededf0; font-variant-numeric: tabular-nums; }
         QFrame#emptyState, QFrame#openingState, QFrame#overlayPanel, QFrame#sourcePanel {
@@ -920,6 +1023,7 @@ void QtPlayerWindow::ApplyTheme() {
         QListWidget::item { min-height: 34px; border-radius: 10px; padding: 2px 10px; }
         QListWidget::item:hover { background: #202025; }
         QListWidget::item:selected { background: #303037; }
+        QListWidget#recentList::item { min-height: 46px; padding: 5px 10px; }
         QToolTip { color: #f4f4f6; background: #151519; border: 1px solid #3b3b42; border-radius: 8px; padding: 6px; }
     )"));
 }
@@ -929,7 +1033,10 @@ void QtPlayerWindow::LayoutOverlays() {
     const int controlsWidth = std::max(0, width() - kControlsMargin * 2);
     controls_->setGeometry(kControlsMargin, std::max(kControlsMargin, height() - kControlsHeight - kControlsMargin),
                            controlsWidth, kControlsHeight);
-    const QSize emptySize(std::min(520, std::max(320, width() - 48)), 252);
+    const bool hasRecentMedia = recentMediaAvailable_ && recentMedia_.Size() != 0;
+    const int preferredEmptyHeight = hasRecentMedia ? 520 : 252;
+    const QSize emptySize(std::min(hasRecentMedia ? 620 : 520, std::max(320, width() - 48)),
+                          std::min(preferredEmptyHeight, std::max(252, height() - 48)));
     const auto updateTransitionGeometry = [](UiTransition& transition, const QRect& geometry) {
         transition.restingGeometry = geometry;
         if (transition.group->state() != QAbstractAnimation::Running) transition.widget->setGeometry(geometry);
@@ -1196,6 +1303,13 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 27:
             *result = static_cast<qintptr>(shaderPresetIndex_);
             return true;
+        case 28:
+            *result = recentList_->count();
+            return true;
+        case 29:
+            value = recentList_->currentItem() &&
+                    recentList_->currentItem()->data(Qt::UserRole + 1).toBool();
+            break;
         default:
             break;
         }
@@ -1222,30 +1336,25 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             break;
         case 7: {
             if (!sourceSelection_) { *result = 0; return true; }
-            std::optional<StreamVariant> cvh;
-            for (const auto& season : sourceSelection_->entry.seasons) {
-                for (const auto& voice : season.voiceTracks) {
-                    for (const auto& episode : voice.episodes) {
-                        for (const auto& stream : episode.streams) {
-                            const QString identity = (ToQString(stream.quality) + QLatin1Char(' ') +
-                                                      ToQString(stream.url)).toLower();
-                            if (!stream.protectedStream &&
-                                (identity.contains(QStringLiteral("cvh")) ||
-                                 identity.contains(QStringLiteral("cdnvideohub")))) {
-                                cvh = stream;
-                                break;
-                            }
-                        }
-                        if (cvh) break;
-                    }
-                    if (cvh) break;
+            std::optional<StreamLocation> cvh;
+            for (const auto& location : StreamLocations(*sourceSelection_)) {
+                const auto* stream = StreamAt(*sourceSelection_, location);
+                if (!stream) continue;
+                const QString identity = (ToQString(stream->quality) + QLatin1Char(' ') +
+                                          ToQString(stream->url)).toLower();
+                if (!stream->protectedStream &&
+                    (identity.contains(QStringLiteral("cvh")) ||
+                     identity.contains(QStringLiteral("cdnvideohub")))) {
+                    cvh = location;
+                    break;
                 }
-                if (cvh) break;
             }
             if (!cvh) { *result = 0; return true; }
-            pendingResumeIdentity_ = SelectedSourceResumeIdentity();
-            HideSourceSelector();
-            OpenVariant(*cvh);
+            sourceSeasonIndex_ = cvh->season;
+            sourceVoiceIndex_ = cvh->voice;
+            sourceEpisodeIndex_ = cvh->episode;
+            sourceStreamIndex_ = cvh->stream;
+            OpenSelectedSource();
             break;
         }
         case 8:
@@ -1358,6 +1467,21 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 28:
             ApplyShaderPreset(1);
             break;
+        case 29:
+            if (!recentList_->currentItem() || !recentList_->currentItem()->data(Qt::UserRole + 1).toBool()) {
+                *result = 0;
+                return true;
+            }
+            OpenSelectedRecent();
+            break;
+        case 30:
+            if (!recentList_->currentItem()) { *result = 0; return true; }
+            RemoveSelectedRecent();
+            break;
+        case 31:
+            if (recentList_->count() == 0) { *result = 0; return true; }
+            ClearRecentMedia();
+            break;
         default: *result = 0; return true;
         }
         *result = 1;
@@ -1438,7 +1562,7 @@ void QtPlayerWindow::dropEvent(QDropEvent* event) {
             engine_.AddSubtitle(ToUtf8(info.absoluteFilePath()));
         } else {
             const auto path = ToUtf8(info.absoluteFilePath());
-            OpenMedia(path, {}, {}, PlaybackIdentity(path));
+            OpenLocalFile(path);
         }
     } else {
         ResolveUrl(ToUtf8(url.toString()));
@@ -1618,13 +1742,30 @@ void QtPlayerWindow::OpenMedia(std::string value,
     }
 }
 
+void QtPlayerWindow::OpenLocalFile(std::string path) {
+    const QFileInfo info(ToQString(path));
+    if (!info.exists() || !info.isFile()) {
+        ShowError(QStringLiteral("Open"), "The selected file no longer exists");
+        return;
+    }
+    const std::string absolutePath = ToUtf8(info.absoluteFilePath());
+    const std::string resumeIdentity = PlaybackIdentity(absolutePath);
+    pendingRecentOpenValue_ = absolutePath;
+    recentReplayEntry_.reset();
+    pendingRecentEntry_ = RecentMediaEntry{
+        PlaybackStateKey("recent\nfile\n" + ToUtf8(info.absoluteFilePath().toCaseFolded())),
+        RecentMediaType::LocalFile, absolutePath, ToUtf8(info.fileName()), ToUtf8(info.absolutePath()),
+        PlaybackStateKey(resumeIdentity), std::nullopt, 0};
+    OpenMedia(absolutePath, {}, {}, resumeIdentity);
+}
+
 void QtPlayerWindow::OpenFileDialog() {
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("Open media"), QString(),
         QStringLiteral("Media files (*.mkv *.mp4 *.m4v *.mov *.webm *.avi *.ts *.m2ts *.mp3 *.flac *.opus *.m4a);;All files (*.*)"));
     if (!path.isEmpty()) {
         const auto absolutePath = ToUtf8(QFileInfo(path).absoluteFilePath());
-        OpenMedia(absolutePath, {}, {}, PlaybackIdentity(absolutePath));
+        OpenLocalFile(absolutePath);
     }
 }
 
@@ -1647,15 +1788,22 @@ void QtPlayerWindow::ShowUrlOverlay() {
 }
 
 void QtPlayerWindow::ResolveUrl(std::string value, HeaderMap inheritedHeaders, bool preserveResumeIdentity) {
-    if (!preserveResumeIdentity) pendingResumeIdentity_ = PlaybackIdentity(value);
+    if (!preserveResumeIdentity) {
+        pendingResumeIdentity_ = PlaybackIdentity(value);
+        pendingRecentOpenValue_ = value;
+        pendingRecentEntry_.reset();
+        recentReplayEntry_.reset();
+        recentReplaySourceMatched_ = false;
+    }
     const auto parsed = Url::Parse(value);
     if (!parsed) {
-        if (std::filesystem::exists(std::filesystem::path(value))) {
-            OpenMedia(value, {}, {}, pendingResumeIdentity_);
+        if (QFileInfo(ToQString(value)).isFile()) {
+            OpenLocalFile(value);
         }
         else ShowError(QStringLiteral("Open"), "The path does not exist or the URL scheme is not allowed");
         return;
     }
+    if (!preserveResumeIdentity) pendingRecentOpenValue_ = parsed->Value();
     if (sourceSelection_) HideSourceSelector();
     if (overlayMode_ != OverlayMode::None) HideOverlay();
     if (inheritedHeaders.empty() && !preserveResumeIdentity) {
@@ -1664,6 +1812,13 @@ void QtPlayerWindow::ResolveUrl(std::string value, HeaderMap inheritedHeaders, b
         browserRetriesRemaining_ = 0;
     }
     if (parsed->IsDirectMedia()) {
+        if (!pendingRecentEntry_) {
+            const QString pathName = QFileInfo(ToQString(parsed->Path())).fileName();
+            pendingRecentEntry_ = RecentMediaEntry{
+                PlaybackStateKey("recent\nurl\n" + parsed->Value()), RecentMediaType::DirectUrl,
+                parsed->Value(), ToUtf8(pathName.isEmpty() ? ToQString(parsed->Host()) : pathName),
+                parsed->Host(), PlaybackStateKey(pendingResumeIdentity_), std::nullopt, 0};
+        }
         std::vector<std::pair<std::string, std::string>> headers(inheritedHeaders.begin(), inheritedHeaders.end());
         OpenMedia(parsed->Value(), std::move(headers), {}, pendingResumeIdentity_);
         return;
@@ -1689,21 +1844,55 @@ void QtPlayerWindow::ResolveUrl(std::string value, HeaderMap inheritedHeaders, b
 void QtPlayerWindow::HandleResolveResult(ResolveResult result) {
     setWindowTitle(QStringLiteral("WannaViewer"));
     if (result.status != ResolveStatus::Resolved) {
+        recentReplayEntry_.reset();
+        recentReplaySourceMatched_ = false;
+        pendingRecentEntry_.reset();
         ShowError(QStringLiteral("URL resolver"), result.message);
         return;
     }
-    std::vector<const StreamVariant*> choices;
-    for (const auto& season : result.entry.seasons)
-        for (const auto& voice : season.voiceTracks)
-            for (const auto& episode : voice.episodes)
-                for (const auto& stream : episode.streams) choices.push_back(&stream);
+    if (recentReplayEntry_ && recentReplayEntry_->selection) {
+        const auto location = recentReplaySourceMatched_
+            ? FindPreferredStream(result, *recentReplayEntry_->selection)
+            : FindRecentLocation(result, *recentReplayEntry_->selection);
+        if (location) {
+            const auto* stream = StreamAt(result, *location);
+            if (stream) {
+                const StreamVariant selected = *stream;
+                const std::string existingId = recentReplayEntry_->id;
+                if (!pendingRecentEntry_) {
+                    PrepareSelectedRecent(result, location->season, location->voice,
+                                          location->episode, location->stream);
+                }
+                if (pendingRecentEntry_) pendingRecentEntry_->id = existingId;
+                recentReplaySourceMatched_ = true;
+                if (selected.protocol != "embed") {
+                    recentReplayEntry_.reset();
+                    recentReplaySourceMatched_ = false;
+                }
+                OpenVariant(selected);
+                return;
+            }
+        }
+        logger_.Write(LogLevel::Info, "playback",
+                      "saved recent source is unavailable; showing the current source selector");
+        recentReplayEntry_.reset();
+        recentReplaySourceMatched_ = false;
+    }
+    const auto choices = StreamLocations(result);
     if (choices.empty()) {
         ShowError(QStringLiteral("URL resolver"), "Metadata was found, but no public playable stream is available");
         return;
     }
-    if (choices.size() == 1 && !choices.front()->protectedStream) {
-        OpenVariant(*choices.front());
-        return;
+    if (choices.size() == 1) {
+        if (const auto* stream = StreamAt(result, choices.front()); stream && !stream->protectedStream) {
+            const StreamVariant selected = *stream;
+            if (!pendingRecentEntry_) {
+                PrepareSelectedRecent(result, choices.front().season, choices.front().voice,
+                                      choices.front().episode, choices.front().stream);
+            }
+            OpenVariant(selected);
+            return;
+        }
     }
     ShowSourceSelector(std::move(result));
 }
@@ -1869,22 +2058,39 @@ const StreamVariant* QtPlayerWindow::SelectedSource() const {
     return &streams[static_cast<std::size_t>(sourceStreamIndex_)];
 }
 
-std::string QtPlayerWindow::SelectedSourceResumeIdentity() const {
-    if (!sourceSelection_ || sourceSeasonIndex_ < 0 || sourceVoiceIndex_ < 0 || sourceEpisodeIndex_ < 0)
-        return pendingResumeIdentity_;
-    const auto& seasons = sourceSelection_->entry.seasons;
-    if (static_cast<std::size_t>(sourceSeasonIndex_) >= seasons.size()) return pendingResumeIdentity_;
-    const auto& season = seasons[static_cast<std::size_t>(sourceSeasonIndex_)];
-    if (static_cast<std::size_t>(sourceVoiceIndex_) >= season.voiceTracks.size()) return pendingResumeIdentity_;
-    const auto& voice = season.voiceTracks[static_cast<std::size_t>(sourceVoiceIndex_)];
-    if (static_cast<std::size_t>(sourceEpisodeIndex_) >= voice.episodes.size()) return pendingResumeIdentity_;
-    const auto& episode = voice.episodes[static_cast<std::size_t>(sourceEpisodeIndex_)];
-    const auto component = [](const std::string& id, const std::string& title) -> const std::string& {
-        return id.empty() ? title : id;
+void QtPlayerWindow::PrepareSelectedRecent(const ResolveResult& result, int seasonIndex, int voiceIndex,
+                                           int episodeIndex, int streamIndex) {
+    const StreamLocation location{seasonIndex, voiceIndex, episodeIndex, streamIndex};
+    const auto* stream = StreamAt(result, location);
+    if (!stream || pendingRecentOpenValue_.empty()) return;
+    const auto& season = result.entry.seasons[static_cast<std::size_t>(seasonIndex)];
+    const auto& voice = season.voiceTracks[static_cast<std::size_t>(voiceIndex)];
+    const auto& episode = voice.episodes[static_cast<std::size_t>(episodeIndex)];
+    const std::string baseIdentity = pendingResumeIdentity_;
+    pendingResumeIdentity_ = std::format("{}\nseason={}\nvoice={}\nepisode={}", baseIdentity,
+        ComponentIdentity(season.id, season.title), ComponentIdentity(voice.id, voice.title),
+        ComponentIdentity(episode.id, episode.title));
+
+    std::string detail;
+    const auto appendDetail = [&detail](const std::string& value) {
+        if (value.empty()) return;
+        if (!detail.empty()) detail += " · ";
+        detail += value;
     };
-    return std::format("{}\nseason={}\nvoice={}\nepisode={}", pendingResumeIdentity_,
-                       component(season.id, season.title), component(voice.id, voice.title),
-                       component(episode.id, episode.title));
+    appendDetail(season.title);
+    appendDetail(voice.title);
+    appendDetail(episode.title);
+    const std::string stableIdentity = std::format("recent\npage\n{}\nseason={}\nvoice={}\nepisode={}",
+        pendingRecentOpenValue_, ComponentIdentity(season.id, season.title),
+        ComponentIdentity(voice.id, voice.title), ComponentIdentity(episode.id, episode.title));
+    const auto parsed = Url::Parse(pendingRecentOpenValue_);
+    const std::string fallbackTitle = parsed ? parsed->Host() : pendingRecentOpenValue_;
+    pendingRecentEntry_ = RecentMediaEntry{
+        PlaybackStateKey(stableIdentity), RecentMediaType::WebPage, pendingRecentOpenValue_,
+        result.entry.title.empty() ? fallbackTitle : result.entry.title, std::move(detail),
+        PlaybackStateKey(pendingResumeIdentity_),
+        RecentMediaSelection{season.id, season.title, voice.id, voice.title, episode.id, episode.title,
+                             stream->quality, stream->protocol}, 0};
 }
 
 void QtPlayerWindow::OpenSelectedSource() {
@@ -1895,7 +2101,13 @@ void QtPlayerWindow::OpenSelectedSource() {
         return;
     }
     const StreamVariant selected = *stream;
-    pendingResumeIdentity_ = SelectedSourceResumeIdentity();
+    if (!pendingRecentEntry_) {
+        PrepareSelectedRecent(*sourceSelection_, sourceSeasonIndex_, sourceVoiceIndex_,
+                              sourceEpisodeIndex_, sourceStreamIndex_);
+    } else if (pendingRecentEntry_->selection) {
+        pendingRecentEntry_->selection->quality = selected.quality;
+        pendingRecentEntry_->selection->protocol = selected.protocol;
+    }
     HideSourceSelector();
     OpenVariant(selected);
 }
@@ -1949,6 +2161,7 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
     case PlaybackEventType::FileLoaded:
         logger_.Write(LogLevel::Info, "playback", "media metadata and tracks loaded");
         currentResumeKey_ = std::move(pendingResumeKey_);
+        CommitPendingRecent();
         resumeSaveSuspended_ = false;
         engine_.SetVolume(static_cast<double>(volume_->value()));
         SetMediaLoaded(true);
@@ -1969,6 +2182,9 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         break;
     case PlaybackEventType::Error:
         if (!playbackStarted_ && RetryBrowserProvider()) return;
+        pendingRecentEntry_.reset();
+        recentReplayEntry_.reset();
+        recentReplaySourceMatched_ = false;
         if (!mediaLoaded_) {
             mediaOpening_ = false;
             UpdateVisibility();
@@ -2288,6 +2504,7 @@ void QtPlayerWindow::SetResumeEnabled(bool enabled) {
     config_.Set("playback.resume", enabled ? "true" : "false");
     config_.Save(paths_.config / "player.conf");
     resumeEnabled_ = enabled;
+    RefreshRecentMedia();
 }
 
 void QtPlayerWindow::ClearPlaybackHistory() {
@@ -2297,6 +2514,130 @@ void QtPlayerWindow::ClearPlaybackHistory() {
     currentResumeKey_.clear();
     pendingResumeKey_.clear();
     if (config_.GetBool("playback.resume", true)) resumeEnabled_ = true;
+    RefreshRecentMedia();
+}
+
+void QtPlayerWindow::RefreshRecentMedia() {
+    if (!recentList_) return;
+    const QSignalBlocker blocker(recentList_);
+    recentList_->clear();
+    if (recentMediaAvailable_) {
+        for (const auto& entry : recentMedia_.Entries()) {
+            bool available = true;
+            QString secondary = ToQString(entry.detail);
+            if (entry.type == RecentMediaType::LocalFile) {
+                available = QFileInfo(ToQString(entry.openValue)).isFile();
+                if (!available) {
+                    if (!secondary.isEmpty()) secondary += QStringLiteral("  ·  ");
+                    secondary += QStringLiteral("File not found");
+                }
+            }
+            if (resumeEnabled_ && !entry.resumeKey.empty()) {
+                const auto progress = playbackState_.Find(entry.resumeKey);
+                if (progress && PlaybackStateStore::ShouldPersist(progress->positionSeconds,
+                                                                   progress->durationSeconds)) {
+                    if (!secondary.isEmpty()) secondary += QStringLiteral("  ·  ");
+                    secondary += QStringLiteral("Continue at %1").arg(TimeText(progress->positionSeconds));
+                }
+            }
+            QString text = ToQString(entry.title);
+            if (!secondary.isEmpty()) text += QLatin1Char('\n') + secondary;
+            auto* item = new QListWidgetItem(text, recentList_);
+            item->setData(Qt::UserRole, ToQString(entry.id));
+            item->setData(Qt::UserRole + 1, available);
+            item->setToolTip(ToQString(entry.openValue));
+            item->setSizeHint(QSize(0, secondary.isEmpty() ? 42 : 52));
+        }
+    }
+    const bool showRecent = recentMediaAvailable_ && recentList_->count() != 0;
+    emptyPlayIcon_->setVisible(!showRecent);
+    recentTitle_->setVisible(showRecent);
+    recentList_->setVisible(showRecent);
+    recentOpen_->setVisible(showRecent);
+    recentRemove_->setVisible(showRecent);
+    recentClear_->setVisible(showRecent);
+    if (showRecent) recentList_->setCurrentRow(0);
+    UpdateRecentActions();
+    LayoutOverlays();
+}
+
+void QtPlayerWindow::UpdateRecentActions() {
+    if (!recentList_ || !recentOpen_) return;
+    const auto* item = recentList_->currentItem();
+    recentOpen_->setEnabled(item && item->data(Qt::UserRole + 1).toBool());
+    recentRemove_->setEnabled(item != nullptr);
+    recentClear_->setEnabled(recentList_->count() != 0);
+}
+
+void QtPlayerWindow::OpenSelectedRecent() {
+    const auto* item = recentList_->currentItem();
+    if (!item || !item->data(Qt::UserRole + 1).toBool()) return;
+    const auto* stored = recentMedia_.Find(ToUtf8(item->data(Qt::UserRole).toString()));
+    if (!stored) {
+        RefreshRecentMedia();
+        return;
+    }
+    const RecentMediaEntry entry = *stored;
+    pendingRecentEntry_.reset();
+    recentReplayEntry_.reset();
+    recentReplaySourceMatched_ = false;
+    if (entry.type == RecentMediaType::LocalFile) {
+        OpenLocalFile(entry.openValue);
+        return;
+    }
+    pendingRecentOpenValue_ = entry.openValue;
+    pendingResumeIdentity_ = PlaybackIdentity(entry.openValue);
+    if (entry.type == RecentMediaType::DirectUrl) {
+        pendingRecentEntry_ = entry;
+        pendingRecentEntry_->resumeKey = PlaybackStateKey(pendingResumeIdentity_);
+        OpenMedia(entry.openValue, {}, {}, pendingResumeIdentity_);
+        return;
+    }
+    recentReplayEntry_ = entry;
+    recentReplaySourceMatched_ = false;
+    ResolveUrl(entry.openValue, {}, true);
+}
+
+void QtPlayerWindow::RemoveSelectedRecent() {
+    const auto* item = recentList_->currentItem();
+    if (!item) return;
+    if (!recentMedia_.Remove(ToUtf8(item->data(Qt::UserRole).toString()))) return;
+    const bool saved = PersistRecentMedia();
+    RefreshRecentMedia();
+    if (!saved) ShowError(QStringLiteral("Recent"), "The recent list could not be saved");
+}
+
+void QtPlayerWindow::ClearRecentMedia() {
+    if (!recentMedia_.Clear()) return;
+    const bool saved = PersistRecentMedia();
+    RefreshRecentMedia();
+    if (!saved) ShowError(QStringLiteral("Recent"), "The recent list could not be saved");
+}
+
+void QtPlayerWindow::CommitPendingRecent() {
+    if (!pendingRecentEntry_ || !recentMediaAvailable_ || benchmarkMode_) {
+        pendingRecentEntry_.reset();
+        return;
+    }
+    RecentMediaEntry entry = std::move(*pendingRecentEntry_);
+    pendingRecentEntry_.reset();
+    if (!recentMedia_.Upsert(std::move(entry))) {
+        logger_.Write(LogLevel::Error, "playback", "invalid recent media entry was not saved");
+        return;
+    }
+    if (!PersistRecentMedia()) return;
+    RefreshRecentMedia();
+}
+
+bool QtPlayerWindow::PersistRecentMedia() {
+    if (!recentMediaAvailable_) return false;
+    try {
+        recentMedia_.Save(paths_.config / "recent-media.json");
+        return true;
+    } catch (const std::exception& error) {
+        logger_.Write(LogLevel::Error, "playback", std::string("unable to save recent media: ") + error.what());
+        return false;
+    }
 }
 
 void QtPlayerWindow::SaveUserSettings() {

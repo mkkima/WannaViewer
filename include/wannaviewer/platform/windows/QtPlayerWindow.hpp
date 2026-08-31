@@ -9,6 +9,7 @@
 #include "wannaviewer/network/ResolverPipeline.hpp"
 #include "wannaviewer/network/YtDlpBridge.hpp"
 #include "wannaviewer/playback/MpvEngine.hpp"
+#include "wannaviewer/playback/PlaybackStateStore.hpp"
 #include "wannaviewer/rendering/ShaderManager.hpp"
 
 #include <QWidget>
@@ -91,11 +92,12 @@ private:
     void StartEngineInitialization();
     void HandleEngineInitialized();
     void OpenMedia(std::string value,
-                   std::vector<std::pair<std::string, std::string>> headers = {},
-                   std::string externalAudioUrl = {});
+                   std::vector<std::pair<std::string, std::string>> headers,
+                   std::string externalAudioUrl,
+                   std::string resumeIdentity);
     void OpenFileDialog();
     void ShowUrlOverlay();
-    void ResolveUrl(std::string value, HeaderMap inheritedHeaders = {});
+    void ResolveUrl(std::string value, HeaderMap inheritedHeaders = {}, bool preserveResumeIdentity = false);
     void HandleResolveResult(ResolveResult result);
     void ShowSourceSelector(ResolveResult result);
     void HideSourceSelector();
@@ -105,6 +107,7 @@ private:
     void PopulateSourceStreams();
     void UpdateSourceSelectionUi();
     [[nodiscard]] const StreamVariant* SelectedSource() const;
+    [[nodiscard]] std::string SelectedSourceResumeIdentity() const;
     void OpenSelectedSource();
     void OpenVariant(const StreamVariant& stream);
     bool RetryBrowserProvider();
@@ -122,6 +125,9 @@ private:
     void ShowPlaybackFeedback(QString text);
     void HidePlaybackFeedback();
     void UpdateControlStates();
+    void RestorePlaybackProgress();
+    void SavePlaybackProgress(bool completed = false);
+    void SaveUserSettings();
     void RecordInteraction();
     void ShowControls(bool show, bool animated = true);
     [[nodiscard]] bool CursorOverControls() const;
@@ -152,6 +158,7 @@ private:
     YtDlpBridge ytDlp_;
     ResolverPipeline resolvers_;
     MpvEngine engine_;
+    PlaybackStateStore playbackState_;
 
     MpvVideoWidget* videoSurface_{nullptr};
     QFrame* controls_{nullptr};
@@ -175,6 +182,8 @@ private:
     QPropertyAnimation* controlsAnimation_{nullptr};
     QTimer* hideTimer_{nullptr};
     QTimer* feedbackTimer_{nullptr};
+    QTimer* progressSaveTimer_{nullptr};
+    QTimer* settingsSaveTimer_{nullptr};
     QTimer* uiTimer_{nullptr};
 
     QFrame* emptyState_{nullptr};
@@ -247,6 +256,9 @@ private:
     bool controlsVisible_{true};
     bool statisticsVisible_{false};
     bool feedbackVisible_{false};
+    bool playbackStateAvailable_{true};
+    bool resumeSaveSuspended_{false};
+    bool settingsDirty_{false};
     bool timelineDragging_{false};
     std::optional<int> pendingTimelineValue_;
     std::chrono::steady_clock::time_point pendingTimelineStarted_{};
@@ -261,6 +273,9 @@ private:
     std::string benchmarkInput_;
     std::string benchmarkProfile_{"hardware"};
     std::string browserRetryUrl_;
+    std::string pendingResumeIdentity_;
+    std::string pendingResumeKey_;
+    std::string currentResumeKey_;
     HeaderMap browserRetryHeaders_;
     unsigned browserRetriesRemaining_{0};
     std::chrono::steady_clock::time_point playbackLoadStarted_{};

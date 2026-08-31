@@ -3,6 +3,9 @@ param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
     [Parameter(Mandatory=$true)][string]$Media,
     [switch]$SkipInteractions,
+    [double]$MinimumInitialPositionSeconds = 0,
+    [switch]$WaitForResumeEntryRemoval,
+    [switch]$VerifySettingPersistence,
     [string]$CapturePath = ''
 )
 
@@ -61,6 +64,10 @@ function Invoke-UiAction([IntPtr]$Window, [int]$Action) {
     }
 }
 
+$configPath = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Player).Path) 'config\player.conf'
+$configExisted = Test-Path -LiteralPath $configPath
+$originalConfigBytes = if ($configExisted) { [IO.File]::ReadAllBytes($configPath) } else { $null }
+$settingsPersistenceVerified = $false
 $start = [Diagnostics.ProcessStartInfo]::new((Resolve-Path -LiteralPath $Player).Path)
 $start.UseShellExecute = $false
 $start.ArgumentList.Add('--background-ui-test')
@@ -90,6 +97,30 @@ try {
         throw "Playback did not produce a frame; last window title: $title"
     }
     if ((Get-UiValue $window 4) -ne 1) { throw 'Playback started without the loaded-media UI state' }
+    if ($MinimumInitialPositionSeconds -gt 0) {
+        $positionDeadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            $positionCentiseconds = Get-UiValue $window 8
+            if ($positionCentiseconds -ge [Math]::Round($MinimumInitialPositionSeconds * 100)) { break }
+            Start-Sleep -Milliseconds 40
+            $process.Refresh()
+        } while (-not $process.HasExited -and [DateTime]::UtcNow -lt $positionDeadline)
+        if ($positionCentiseconds -lt [Math]::Round($MinimumInitialPositionSeconds * 100)) {
+            throw "Playback did not resume at or beyond $MinimumInitialPositionSeconds seconds; position was $($positionCentiseconds / 100.0)"
+        }
+    }
+    if ($WaitForResumeEntryRemoval) {
+        if ((Get-UiValue $window 21) -ne 1) { throw 'No saved resume entry was loaded for completion testing' }
+        $completionDeadline = [DateTime]::UtcNow.AddSeconds(45)
+        do {
+            Start-Sleep -Milliseconds 100
+            $process.Refresh()
+        } while (-not $process.HasExited -and (Get-UiValue $window 21) -eq 1 -and
+                 [DateTime]::UtcNow -lt $completionDeadline)
+        if ((Get-UiValue $window 21) -ne 0) {
+            throw 'Completed playback retained its saved resume entry'
+        }
+    }
 
     if (-not $SkipInteractions) {
         Invoke-UiAction $window 3
@@ -159,6 +190,13 @@ try {
             throw 'Mute button retained its active state after sound was restored'
         }
 
+        if ($VerifySettingPersistence) {
+            Invoke-UiAction $window 19
+            if ((Get-UiValue $window 20) -ne 37) {
+                throw 'Volume control did not accept the persistence test value'
+            }
+        }
+
         foreach ($key in @(0x20,0x20,0x27,0x53,0x41,0x46,0x46,0x79)) {
             [void][WannaViewerQtPlaybackSmokeNative]::PostMessage($window, 0x0100, [IntPtr]$key, [IntPtr]::Zero)
             [void][WannaViewerQtPlaybackSmokeNative]::PostMessage($window, 0x0101, [IntPtr]$key, [IntPtr]::Zero)
@@ -173,6 +211,18 @@ try {
     if ($process.ExitCode -ne 0) { throw "Qt player exited with code $($process.ExitCode)" }
 } finally {
     if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+    if ($VerifySettingPersistence -and (Test-Path -LiteralPath $configPath)) {
+        $settingsPersistenceVerified = Select-String -LiteralPath $configPath -Pattern '^playback\.volume=37$' -Quiet
+    }
+    if ($configExisted) {
+        [IO.File]::WriteAllBytes($configPath, $originalConfigBytes)
+    } elseif (Test-Path -LiteralPath $configPath) {
+        Remove-Item -LiteralPath $configPath -Force
+    }
+}
+
+if ($VerifySettingPersistence -and -not $settingsPersistenceVerified) {
+    throw 'Volume setting was not persisted to config/player.conf'
 }
 
 if ($SkipInteractions) {

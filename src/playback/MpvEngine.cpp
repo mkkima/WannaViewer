@@ -46,6 +46,17 @@ std::int64_t InferBitDepth(std::string_view pixelFormat) {
     return pixelFormat.empty() ? 0 : 8;
 }
 
+std::string EndReasonName(int reason) {
+    switch (reason) {
+    case MPV_END_FILE_REASON_EOF: return "eof";
+    case MPV_END_FILE_REASON_STOP: return "stop";
+    case MPV_END_FILE_REASON_QUIT: return "quit";
+    case MPV_END_FILE_REASON_ERROR: return "error";
+    case MPV_END_FILE_REASON_REDIRECT: return "redirect";
+    default: return "unknown";
+    }
+}
+
 } // namespace
 
 MpvEngine::MpvEngine(const AppPaths& paths, const Config& config, Logger& logger)
@@ -445,7 +456,7 @@ void MpvEngine::EventLoop(std::stop_token stopToken) {
             const auto* end = static_cast<mpv_event_end_file*>(event->data);
             if (end && end->reason == MPV_END_FILE_REASON_ERROR)
                 Emit({PlaybackEventType::Error, "playback", api_.ErrorString(end->error)});
-            Emit({PlaybackEventType::EndFile, {}, {}});
+            Emit({PlaybackEventType::EndFile, end ? EndReasonName(end->reason) : "unknown", {}});
             break;
         }
         case MPV_EVENT_VIDEO_RECONFIG:

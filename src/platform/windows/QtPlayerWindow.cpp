@@ -17,6 +17,7 @@
 #include <QBoxLayout>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEnterEvent>
@@ -75,6 +76,8 @@ constexpr int kUiIntervalMs = 50;
 constexpr int kPanelEnterDurationMs = 190;
 constexpr int kPanelExitDurationMs = 140;
 constexpr int kFeedbackDurationMs = 950;
+constexpr int kProgressSaveIntervalMs = 10000;
+constexpr int kSettingsSaveDelayMs = 500;
 constexpr UINT kBackgroundTestQueryMessage = WM_APP + 0x250;
 constexpr UINT kBackgroundTestActionMessage = WM_APP + 0x251;
 
@@ -105,6 +108,38 @@ QString TimeText(double seconds) {
 
 QString DisplayLabel(std::string_view value, const char* fallback) {
     return value.empty() ? QString::fromUtf8(fallback) : ToQString(value);
+}
+
+std::string PlaybackIdentity(std::string_view value) {
+    if (const auto parsed = Url::Parse(value)) return "url\n" + parsed->Value();
+    std::error_code error;
+    const std::filesystem::path path(value);
+    if (std::filesystem::is_regular_file(path, error) && !error) {
+        auto canonical = std::filesystem::weakly_canonical(path, error);
+        if (error) {
+            error.clear();
+            canonical = std::filesystem::absolute(path, error);
+        }
+        std::string normalized = error ? std::string(value) : canonical.string();
+#ifdef _WIN32
+        normalized = error ? ToUtf8(ToQString(value).toCaseFolded())
+                           : ToUtf8(QString::fromStdWString(canonical.wstring()).toCaseFolded());
+#endif
+        error.clear();
+        const auto size = std::filesystem::file_size(path, error);
+        const auto safeSize = error ? std::uintmax_t{0} : size;
+        error.clear();
+        const auto modified = std::filesystem::last_write_time(path, error);
+        const auto modifiedTicks = error ? std::int64_t{0} :
+            static_cast<std::int64_t>(modified.time_since_epoch().count());
+        return std::format("file\n{}\n{}\n{}", normalized, safeSize, modifiedTicks);
+    }
+    return "value\n" + std::string(value);
+}
+
+std::string PlaybackStateKey(std::string_view identity) {
+    const QByteArray bytes(identity.data(), static_cast<qsizetype>(identity.size()));
+    return QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex().toStdString();
 }
 
 enum class Glyph {
@@ -495,6 +530,16 @@ QtPlayerWindow::QtPlayerWindow(AppPaths paths, Config config, Logger& logger,
                      (!backgroundTest && config_.GetBool("ui.animations", true) && SystemAnimationsEnabled())),
       motionTest_(motionTest) {
     shaders_.Reload();
+    if (config_.GetBool("playback.resume", true)) {
+        try {
+            playbackState_ = PlaybackStateStore::Load(paths_.config / "playback-state.json");
+        } catch (const std::exception& error) {
+            playbackStateAvailable_ = false;
+            logger_.Write(LogLevel::Error, "playback", std::string("resume state disabled: ") + error.what());
+        }
+    } else {
+        playbackStateAvailable_ = false;
+    }
     resolvers_.Add(std::make_unique<DirectMediaResolver>());
     resolvers_.Add(std::make_unique<AnimeGoResolver>());
     resolvers_.Add(std::make_unique<BrowserEmbedResolver>(paths_.cache / "webview2"));
@@ -556,7 +601,7 @@ void QtPlayerWindow::BuildUi() {
     volume_ = new PolishedSlider(controls_, motionEnabled_);
     volume_->setObjectName(QStringLiteral("volume"));
     volume_->setRange(0, 100);
-    volume_->setValue(80);
+    volume_->setValue(static_cast<int>(config_.GetInt("playback.volume", 80, 0, 100)));
     volume_->setFixedWidth(86);
     volume_->setFixedHeight(22);
     timeLabel_ = new QLabel(QStringLiteral("00:00  /  00:00"), controls_);
@@ -733,6 +778,12 @@ void QtPlayerWindow::BuildUi() {
     feedbackTimer_ = new QTimer(this);
     feedbackTimer_->setSingleShot(true);
     feedbackTimer_->setInterval(kFeedbackDurationMs);
+    progressSaveTimer_ = new QTimer(this);
+    progressSaveTimer_->setInterval(kProgressSaveIntervalMs);
+    progressSaveTimer_->setTimerType(Qt::VeryCoarseTimer);
+    settingsSaveTimer_ = new QTimer(this);
+    settingsSaveTimer_->setSingleShot(true);
+    settingsSaveTimer_->setInterval(kSettingsSaveDelayMs);
     uiTimer_ = new QTimer(this);
     uiTimer_->setInterval(kUiIntervalMs);
     uiTimer_->setTimerType(Qt::PreciseTimer);
@@ -751,6 +802,8 @@ void QtPlayerWindow::ConnectUi() {
     connect(volume_, &QSlider::valueChanged, this, [this](int value) {
         if (engineReady_ && mediaLoaded_) engine_.SetVolume(static_cast<double>(value));
         if (mediaLoaded_) ShowPlaybackFeedback(QStringLiteral("Volume  ·  %1%").arg(value));
+        settingsDirty_ = true;
+        settingsSaveTimer_->start();
         RecordInteraction();
     });
     connect(timeline_, &QSlider::sliderPressed, this, [this] { timelineDragging_ = true; RecordInteraction(); });
@@ -797,6 +850,8 @@ void QtPlayerWindow::ConnectUi() {
     });
     connect(uiTimer_, &QTimer::timeout, this, [this] { UpdateUi(); });
     connect(feedbackTimer_, &QTimer::timeout, this, [this] { HidePlaybackFeedback(); });
+    connect(progressSaveTimer_, &QTimer::timeout, this, [this] { SavePlaybackProgress(); });
+    connect(settingsSaveTimer_, &QTimer::timeout, this, [this] { SaveUserSettings(); });
     connect(controlsAnimation_, &QPropertyAnimation::finished, this, [this] {
         if (!controlsVisible_) controls_->hide();
     });
@@ -1092,6 +1147,12 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             *result = states;
             return true;
         }
+        case 20:
+            *result = volume_->value();
+            return true;
+        case 21:
+            value = !currentResumeKey_.empty() && playbackState_.Find(currentResumeKey_).has_value();
+            break;
         default:
             break;
         }
@@ -1139,6 +1200,7 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
                 if (cvh) break;
             }
             if (!cvh) { *result = 0; return true; }
+            pendingResumeIdentity_ = SelectedSourceResumeIdentity();
             HideSourceSelector();
             OpenVariant(*cvh);
             break;
@@ -1209,6 +1271,9 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 18:
             ToggleMute();
             break;
+        case 19:
+            volume_->setValue(37);
+            break;
         default: *result = 0; return true;
         }
         *result = 1;
@@ -1250,12 +1315,17 @@ void QtPlayerWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void QtPlayerWindow::closeEvent(QCloseEvent* event) {
+    SavePlaybackProgress();
+    SaveUserSettings();
     closing_.store(true);
     if (resolverThread_.joinable()) resolverThread_.request_stop();
     // The Render API belongs to QOpenGLWidget's context. Release it while the
     // widget is still shown and the GUI event loop is active; after this there
     // is no foreign child HWND, so teardown cannot re-enter qwindows.
     hideTimer_->stop();
+    feedbackTimer_->stop();
+    progressSaveTimer_->stop();
+    settingsSaveTimer_->stop();
     uiTimer_->stop();
     StopUiAnimations();
     if (engineReady_) {
@@ -1283,7 +1353,8 @@ void QtPlayerWindow::dropEvent(QDropEvent* event) {
                              extension == QStringLiteral("sup"))) {
             engine_.AddSubtitle(ToUtf8(info.absoluteFilePath()));
         } else {
-            OpenMedia(ToUtf8(info.absoluteFilePath()));
+            const auto path = ToUtf8(info.absoluteFilePath());
+            OpenMedia(path, {}, {}, PlaybackIdentity(path));
         }
     } else {
         ResolveUrl(ToUtf8(url.toString()));
@@ -1423,7 +1494,13 @@ void QtPlayerWindow::EnableBenchmark(std::string value, std::string mode) {
 
 void QtPlayerWindow::OpenMedia(std::string value,
                                std::vector<std::pair<std::string, std::string>> headers,
-                               std::string externalAudioUrl) {
+                               std::string externalAudioUrl,
+                               std::string resumeIdentity) {
+    SavePlaybackProgress();
+    resumeSaveSuspended_ = true;
+    pendingResumeKey_ = playbackStateAvailable_ && !benchmarkMode_
+        ? PlaybackStateKey(resumeIdentity.empty() ? PlaybackIdentity(value) : resumeIdentity)
+        : std::string{};
     if (sourceSelection_) HideSourceSelector();
     if (overlayMode_ != OverlayMode::None) HideOverlay();
     mediaOpening_ = true;
@@ -1460,7 +1537,10 @@ void QtPlayerWindow::OpenFileDialog() {
     const QString path = QFileDialog::getOpenFileName(
         this, QStringLiteral("Open media"), QString(),
         QStringLiteral("Media files (*.mkv *.mp4 *.m4v *.mov *.webm *.avi *.ts *.m2ts *.mp3 *.flac *.opus *.m4a);;All files (*.*)"));
-    if (!path.isEmpty()) OpenMedia(ToUtf8(QFileInfo(path).absoluteFilePath()));
+    if (!path.isEmpty()) {
+        const auto absolutePath = ToUtf8(QFileInfo(path).absoluteFilePath());
+        OpenMedia(absolutePath, {}, {}, PlaybackIdentity(absolutePath));
+    }
 }
 
 void QtPlayerWindow::ShowUrlOverlay() {
@@ -1481,23 +1561,26 @@ void QtPlayerWindow::ShowUrlOverlay() {
     overlayEdit_->selectAll();
 }
 
-void QtPlayerWindow::ResolveUrl(std::string value, HeaderMap inheritedHeaders) {
+void QtPlayerWindow::ResolveUrl(std::string value, HeaderMap inheritedHeaders, bool preserveResumeIdentity) {
+    if (!preserveResumeIdentity) pendingResumeIdentity_ = PlaybackIdentity(value);
     const auto parsed = Url::Parse(value);
     if (!parsed) {
-        if (std::filesystem::exists(std::filesystem::path(value))) OpenMedia(std::move(value));
+        if (std::filesystem::exists(std::filesystem::path(value))) {
+            OpenMedia(value, {}, {}, pendingResumeIdentity_);
+        }
         else ShowError(QStringLiteral("Open"), "The path does not exist or the URL scheme is not allowed");
         return;
     }
     if (sourceSelection_) HideSourceSelector();
     if (overlayMode_ != OverlayMode::None) HideOverlay();
-    if (inheritedHeaders.empty()) {
+    if (inheritedHeaders.empty() && !preserveResumeIdentity) {
         browserRetryUrl_.clear();
         browserRetryHeaders_.clear();
         browserRetriesRemaining_ = 0;
     }
     if (parsed->IsDirectMedia()) {
         std::vector<std::pair<std::string, std::string>> headers(inheritedHeaders.begin(), inheritedHeaders.end());
-        OpenMedia(parsed->Value(), std::move(headers));
+        OpenMedia(parsed->Value(), std::move(headers), {}, pendingResumeIdentity_);
         return;
     }
     bool expected = false;
@@ -1701,6 +1784,24 @@ const StreamVariant* QtPlayerWindow::SelectedSource() const {
     return &streams[static_cast<std::size_t>(sourceStreamIndex_)];
 }
 
+std::string QtPlayerWindow::SelectedSourceResumeIdentity() const {
+    if (!sourceSelection_ || sourceSeasonIndex_ < 0 || sourceVoiceIndex_ < 0 || sourceEpisodeIndex_ < 0)
+        return pendingResumeIdentity_;
+    const auto& seasons = sourceSelection_->entry.seasons;
+    if (static_cast<std::size_t>(sourceSeasonIndex_) >= seasons.size()) return pendingResumeIdentity_;
+    const auto& season = seasons[static_cast<std::size_t>(sourceSeasonIndex_)];
+    if (static_cast<std::size_t>(sourceVoiceIndex_) >= season.voiceTracks.size()) return pendingResumeIdentity_;
+    const auto& voice = season.voiceTracks[static_cast<std::size_t>(sourceVoiceIndex_)];
+    if (static_cast<std::size_t>(sourceEpisodeIndex_) >= voice.episodes.size()) return pendingResumeIdentity_;
+    const auto& episode = voice.episodes[static_cast<std::size_t>(sourceEpisodeIndex_)];
+    const auto component = [](const std::string& id, const std::string& title) -> const std::string& {
+        return id.empty() ? title : id;
+    };
+    return std::format("{}\nseason={}\nvoice={}\nepisode={}", pendingResumeIdentity_,
+                       component(season.id, season.title), component(voice.id, voice.title),
+                       component(episode.id, episode.title));
+}
+
 void QtPlayerWindow::OpenSelectedSource() {
     const auto* stream = SelectedSource();
     if (!stream) return;
@@ -1709,6 +1810,7 @@ void QtPlayerWindow::OpenSelectedSource() {
         return;
     }
     const StreamVariant selected = *stream;
+    pendingResumeIdentity_ = SelectedSourceResumeIdentity();
     HideSourceSelector();
     OpenVariant(selected);
 }
@@ -1727,11 +1829,11 @@ void QtPlayerWindow::OpenVariant(const StreamVariant& stream) {
         } else {
             browserRetryUrl_.clear(); browserRetryHeaders_.clear(); browserRetriesRemaining_ = 0;
         }
-        ResolveUrl(stream.url, stream.headers);
+        ResolveUrl(stream.url, stream.headers, true);
         return;
     }
     std::vector<std::pair<std::string, std::string>> headers(stream.headers.begin(), stream.headers.end());
-    OpenMedia(stream.url, std::move(headers), stream.audioUrl);
+    OpenMedia(stream.url, std::move(headers), stream.audioUrl, pendingResumeIdentity_);
 }
 
 bool QtPlayerWindow::RetryBrowserProvider() {
@@ -1740,7 +1842,7 @@ bool QtPlayerWindow::RetryBrowserProvider() {
     engine_.Stop();
     SetMediaLoaded(false);
     playbackStarted_ = false;
-    ResolveUrl(browserRetryUrl_, browserRetryHeaders_);
+    ResolveUrl(browserRetryUrl_, browserRetryHeaders_, true);
     return true;
 }
 
@@ -1761,8 +1863,11 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         break;
     case PlaybackEventType::FileLoaded:
         logger_.Write(LogLevel::Info, "playback", "media metadata and tracks loaded");
+        currentResumeKey_ = std::move(pendingResumeKey_);
+        resumeSaveSuspended_ = false;
         engine_.SetVolume(static_cast<double>(volume_->value()));
         SetMediaLoaded(true);
+        RestorePlaybackProgress();
         setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark buffering")
                                       : QStringLiteral("WannaViewer — buffering…"));
         if (benchmarkMode_ && benchmarkProfile_ == "hardware-shader") ApplyShaderHotkey(2);
@@ -1773,6 +1878,8 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         UpdatePlaybackStartedState();
         break;
     case PlaybackEventType::EndFile:
+        progressSaveTimer_->stop();
+        if (event.name == "eof") SavePlaybackProgress(true);
         if (benchmarkRunning_) FinishBenchmark();
         break;
     case PlaybackEventType::Error:
@@ -1841,9 +1948,11 @@ void QtPlayerWindow::SetMediaLoaded(bool loaded) {
     UpdateControlStates();
     if (loaded) {
         uiTimer_->start();
+        if (!benchmarkMode_) progressSaveTimer_->start();
         RecordInteraction();
-    } else if (!benchmarkMode_) {
-        uiTimer_->stop();
+    } else {
+        progressSaveTimer_->stop();
+        if (!benchmarkMode_) uiTimer_->stop();
     }
 }
 
@@ -2004,6 +2113,54 @@ void QtPlayerWindow::UpdateControlStates() {
     SetButtonActive(shaderButton_, mediaLoaded_ && shaderPresetIndex_ != 0);
     SetButtonActive(statsButton_, mediaLoaded_ && statisticsVisible_);
     SetButtonActive(fullscreenButton_, mediaLoaded_ && fullscreen_);
+}
+
+void QtPlayerWindow::RestorePlaybackProgress() {
+    if (!playbackStateAvailable_ || benchmarkMode_ || currentResumeKey_.empty() || !mediaLoaded_) return;
+    const double duration = engine_.Duration();
+    const auto position = playbackState_.ResumePosition(currentResumeKey_, duration);
+    if (!position) return;
+    pendingTimelineValue_ = duration > 0.0
+        ? static_cast<int>(std::lround(std::clamp(*position / duration, 0.0, 1.0) * 10000.0)) : 0;
+    pendingTimelineStarted_ = std::chrono::steady_clock::now();
+    engine_.SeekAbsolute(*position);
+    ShowPlaybackFeedback(QStringLiteral("Resumed  ·  %1").arg(TimeText(*position)));
+    logger_.Write(LogLevel::Info, "playback", std::format("resumed at {:.1f} seconds", *position));
+}
+
+void QtPlayerWindow::SavePlaybackProgress(bool completed) {
+    if (!playbackStateAvailable_ || benchmarkMode_ || resumeSaveSuspended_ || currentResumeKey_.empty()) return;
+    bool changed = false;
+    if (completed) {
+        changed = playbackState_.Remove(currentResumeKey_);
+    } else if (engineReady_ && mediaLoaded_) {
+        const double position = engine_.Position();
+        const double duration = engine_.Duration();
+        if (PlaybackStateStore::ShouldPersist(position, duration)) {
+            changed = playbackState_.Update(currentResumeKey_, position, duration);
+        } else if (std::isfinite(position) && std::isfinite(duration) && duration >= 60.0 &&
+                   position >= 10.0) {
+            changed = playbackState_.Remove(currentResumeKey_);
+        }
+    }
+    if (!changed) return;
+    try {
+        playbackState_.Save(paths_.config / "playback-state.json");
+    } catch (const std::exception& error) {
+        logger_.Write(LogLevel::Error, "playback", std::string("unable to save resume state: ") + error.what());
+    }
+}
+
+void QtPlayerWindow::SaveUserSettings() {
+    settingsSaveTimer_->stop();
+    if (!settingsDirty_) return;
+    try {
+        config_.Set("playback.volume", std::to_string(volume_->value()));
+        config_.Save(paths_.config / "player.conf");
+        settingsDirty_ = false;
+    } catch (const std::exception& error) {
+        logger_.Write(LogLevel::Error, "config", std::string("unable to save playback settings: ") + error.what());
+    }
 }
 
 void QtPlayerWindow::RecordInteraction() {

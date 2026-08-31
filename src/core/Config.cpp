@@ -6,6 +6,10 @@
 #include <mutex>
 #include <stdexcept>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace wannaviewer {
 namespace {
 
@@ -85,7 +89,8 @@ void Config::Set(std::string key, std::string value) {
 
 void Config::Save(const std::filesystem::path& path) const {
     std::shared_lock lock(mutex_);
-    const auto temporary = path.string() + ".tmp";
+    auto temporary = path;
+    temporary += ".tmp";
     std::ofstream output(temporary, std::ios::trunc);
     if (!output) throw std::runtime_error("Unable to write configuration");
     std::vector<std::pair<std::string, std::string>> sorted(values_.begin(), values_.end());
@@ -94,14 +99,21 @@ void Config::Save(const std::filesystem::path& path) const {
     output.flush();
     if (!output) throw std::runtime_error("Unable to flush configuration");
     output.close();
+#ifdef _WIN32
+    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code cleanupError;
+        std::filesystem::remove(temporary, cleanupError);
+        throw std::runtime_error("Unable to replace configuration");
+    }
+#else
     std::error_code error;
     std::filesystem::rename(temporary, path, error);
     if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
+        std::error_code cleanupError;
+        std::filesystem::remove(temporary, cleanupError);
+        throw std::runtime_error("Unable to replace configuration");
     }
-    if (error) throw std::runtime_error("Unable to replace configuration");
+#endif
 }
 
 } // namespace wannaviewer

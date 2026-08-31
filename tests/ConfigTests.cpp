@@ -25,8 +25,10 @@ WV_TEST("config saves atomically readable output") {
     config.Set("z", "last");
     config.Set("a", "first");
     config.Save(path);
+    config.Set("a", "updated");
+    config.Save(path);
     auto loaded = wannaviewer::Config::Load(path);
-    WV_REQUIRE(loaded.GetString("a") == "first");
+    WV_REQUIRE(loaded.GetString("a") == "updated");
     WV_REQUIRE(loaded.GetString("z") == "last");
     std::error_code error;
     std::filesystem::remove(path, error);

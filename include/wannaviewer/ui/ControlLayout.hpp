@@ -39,6 +39,8 @@ struct ControlLayout final {
 
 enum class OverlayContent { Choice, Input, Message };
 
+enum class PointerInteraction { OutsideControls, HoveringControls, Pressing };
+
 struct OverlayLayout final {
     Rect panel;
     Rect title;
@@ -71,6 +73,9 @@ struct SourceSelectorLayout final {
                                                   unsigned dpi, bool controlsVisible);
 [[nodiscard]] int TimelineValueFromPoint(int x, int channelLeft, int channelRight,
                                          int minimum, int maximum) noexcept;
+[[nodiscard]] bool ShouldHideControlsAfterInactivity(PointerInteraction pointerInteraction,
+                                                     bool timelineDragging,
+                                                     bool modalVisible) noexcept;
 [[nodiscard]] SourceSelectorLayout ComputeSourceSelectorLayout(int clientWidth, int contentHeight,
                                                                 unsigned dpi, bool visible);
 [[nodiscard]] OverlayLayout ComputeOverlayLayout(int clientWidth, int clientHeight, unsigned dpi,

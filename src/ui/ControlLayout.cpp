@@ -89,6 +89,13 @@ int TimelineValueFromPoint(int x, int channelLeft, int channelRight,
     return minimum + static_cast<int>((range * clamped + width / 2) / width);
 }
 
+bool ShouldHideControlsAfterInactivity(PointerInteraction pointerInteraction,
+                                       bool timelineDragging,
+                                       bool modalVisible) noexcept {
+    if (modalVisible || timelineDragging) return false;
+    return pointerInteraction != PointerInteraction::Pressing;
+}
+
 SourceSelectorLayout ComputeSourceSelectorLayout(int clientWidth, int contentHeight,
                                                   unsigned dpi, bool visible) {
     SourceSelectorLayout result;

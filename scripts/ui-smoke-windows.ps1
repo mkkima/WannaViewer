@@ -152,6 +152,20 @@ try {
         if ((Get-UiValue $window 6) -ne 1) { throw 'Playback controls did not reappear cleanly' }
         if ((Get-UiValue $window 11) -ne 1000) { throw 'Playback controls reappeared with incomplete opacity' }
 
+        Invoke-UiAction $window 32
+        $controlsHideDeadline = [DateTime]::UtcNow.AddSeconds(4)
+        do {
+            Start-Sleep -Milliseconds 40
+            $process.Refresh()
+        } while (-not $process.HasExited -and
+                 ((Get-UiValue $window 6) -ne 0 -or (Get-UiValue $window 11) -ne 0) -and
+                 [DateTime]::UtcNow -lt $controlsHideDeadline)
+        if ($process.HasExited) { throw "Qt player exited while waiting for controls to auto-hide with code $($process.ExitCode)" }
+        if ((Get-UiValue $window 6) -ne 0 -or (Get-UiValue $window 11) -ne 0) {
+            throw 'Playback controls did not auto-hide after pointer inactivity'
+        }
+        Invoke-UiAction $window 3
+
         Invoke-UiAction $window 6
         if ((Get-UiValue $window 7) -lt 4900 -or (Get-UiValue $window 7) -gt 5100) {
             throw "Timeline did not retain the exact selected position: $(Get-UiValue $window 7)"

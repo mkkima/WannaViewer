@@ -90,6 +90,17 @@ WV_TEST("timeline pointer mapping is exact and clamps outside the channel") {
     WV_REQUIRE(wannaviewer::ui::TimelineValueFromPoint(50, 0, 100, 9, 3) == 9);
 }
 
+WV_TEST("idle playback controls hide even when the pointer rests over them") {
+    using wannaviewer::ui::PointerInteraction;
+    using wannaviewer::ui::ShouldHideControlsAfterInactivity;
+
+    WV_REQUIRE(ShouldHideControlsAfterInactivity(PointerInteraction::OutsideControls, false, false));
+    WV_REQUIRE(ShouldHideControlsAfterInactivity(PointerInteraction::HoveringControls, false, false));
+    WV_REQUIRE(!ShouldHideControlsAfterInactivity(PointerInteraction::Pressing, false, false));
+    WV_REQUIRE(!ShouldHideControlsAfterInactivity(PointerInteraction::HoveringControls, true, false));
+    WV_REQUIRE(!ShouldHideControlsAfterInactivity(PointerInteraction::OutsideControls, false, true));
+}
+
 WV_TEST("embedded overlays remain bounded for choice input and message content") {
     for (const auto content : {wannaviewer::ui::OverlayContent::Choice,
                                wannaviewer::ui::OverlayContent::Input,

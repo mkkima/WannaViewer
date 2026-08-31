@@ -959,7 +959,12 @@ void QtPlayerWindow::ConnectUi() {
         UpdateSourceSelectionUi();
     });
     connect(hideTimer_, &QTimer::timeout, this, [this] {
-        if (CursorOverControls() || overlayMode_ != OverlayMode::None || sourceSelection_) {
+        const auto pointerInteraction = QApplication::mouseButtons() != Qt::NoButton
+            ? ui::PointerInteraction::Pressing
+            : CursorOverControls() ? ui::PointerInteraction::HoveringControls
+                                   : ui::PointerInteraction::OutsideControls;
+        const bool modalVisible = overlayMode_ != OverlayMode::None || sourceSelection_.has_value();
+        if (!ui::ShouldHideControlsAfterInactivity(pointerInteraction, timelineDragging_, modalVisible)) {
             hideTimer_->start(250);
             return;
         }
@@ -1479,6 +1484,9 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             if (recentList_->count() == 0) { *result = 0; return true; }
             ClearRecentMedia();
             break;
+        case 32:
+            RecordInteraction();
+            break;
         default: *result = 0; return true;
         }
         *result = 1;
@@ -1492,10 +1500,12 @@ bool QtPlayerWindow::eventFilter(QObject* watched, QEvent* event) {
     switch (event->type()) {
     case QEvent::MouseMove:
     case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease:
     case QEvent::Wheel:
     case QEvent::KeyPress:
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
         RecordInteraction();
         break;
     default:

@@ -7,6 +7,19 @@
 #include <system_error>
 
 namespace wannaviewer {
+namespace {
+
+std::filesystem::path RotatedPath(const std::filesystem::path& path, unsigned index) {
+    auto result = path;
+#ifdef _WIN32
+    result += L"." + std::to_wstring(index);
+#else
+    result += "." + std::to_string(index);
+#endif
+    return result;
+}
+
+} // namespace
 
 Logger::~Logger() {
     std::scoped_lock lock(mutex_);
@@ -53,8 +66,8 @@ void Logger::RotateIfNeededLocked() {
         return;
     }
     for (unsigned index = retainedFiles_; index > 0; --index) {
-        const auto destination = path_.string() + '.' + std::to_string(index);
-        const auto source = index == 1 ? path_ : std::filesystem::path(path_.string() + '.' + std::to_string(index - 1));
+        const auto destination = RotatedPath(path_, index);
+        const auto source = index == 1 ? path_ : RotatedPath(path_, index - 1);
         std::filesystem::remove(destination, error);
         error.clear();
         if (std::filesystem::exists(source, error)) std::filesystem::rename(source, destination, error);

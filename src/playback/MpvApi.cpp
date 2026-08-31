@@ -1,4 +1,5 @@
 #include "wannaviewer/playback/MpvApi.hpp"
+#include "wannaviewer/core/Path.hpp"
 
 #include <format>
 #include <stdexcept>
@@ -37,7 +38,7 @@ void MpvApi::Load(const std::filesystem::path& libraryPath) {
 #else
     module_ = dlopen(libraryPath.c_str(), RTLD_NOW | RTLD_LOCAL);
 #endif
-    if (!module_) throw std::runtime_error("Unable to load libmpv from " + libraryPath.string());
+    if (!module_) throw std::runtime_error("Unable to load libmpv from " + PathToUtf8(libraryPath));
     create_ = Import<decltype(create_)>("mpv_create");
     initialize_ = Import<decltype(initialize_)>("mpv_initialize");
     terminateDestroy_ = Import<decltype(terminateDestroy_)>("mpv_terminate_destroy");

@@ -1,4 +1,5 @@
 #include "wannaviewer/playback/MpvEngine.hpp"
+#include "wannaviewer/core/Path.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -124,7 +125,7 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         SetRequiredOption("demuxer-max-bytes", maximumCache);
         SetRequiredOption("demuxer-max-back-bytes", "33554432");
         SetRequiredOption("gpu-shader-cache", "yes");
-        SetRequiredOption("gpu-shader-cache-dir", paths_.cache.string());
+        SetRequiredOption("gpu-shader-cache-dir", PathToUtf8(paths_.cache));
         SetRequiredOption("target-colorspace-hint", "yes");
         if (videoOutput != "null" && !openGlRenderApi_) {
 #ifdef _WIN32
@@ -348,9 +349,9 @@ void MpvEngine::SetShaders(const std::vector<std::filesystem::path>& shaders) {
     Command({"change-list", "glsl-shaders", "clr", ""});
     std::string display;
     for (const auto& shader : shaders) {
-        Command({"change-list", "glsl-shaders", "append", shader.string()});
+        Command({"change-list", "glsl-shaders", "append", PathToUtf8(shader)});
         if (!display.empty()) display += " + ";
-        display += shader.filename().string();
+        display += PathToUtf8(shader.filename());
     }
     std::scoped_lock lock(shaderMutex_);
     shaderChain_ = display.empty() ? "Off" : std::move(display);

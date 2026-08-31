@@ -1,4 +1,5 @@
 #include "wannaviewer/network/Process.hpp"
+#include "wannaviewer/core/Path.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -31,7 +32,7 @@ ProcessResult RunProcess(const std::filesystem::path& executable,
     posix_spawnattr_init(&attributes);
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attributes, 0);
-    std::vector<std::string> storage{executable.string()};
+    std::vector<std::string> storage{PathToUtf8(executable)};
     storage.insert(storage.end(), arguments.begin(), arguments.end());
     std::vector<char*> argv;
     for (auto& argument : storage) argv.push_back(argument.data());

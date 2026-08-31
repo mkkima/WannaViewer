@@ -1,4 +1,5 @@
 #include "wannaviewer/rendering/ShaderManager.hpp"
+#include "wannaviewer/core/Path.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -12,7 +13,7 @@ ShaderManager::ShaderManager(std::filesystem::path shaderRoot, std::filesystem::
 
 void ShaderManager::Reload() {
     std::ifstream input(presetFile_);
-    if (!input) throw std::runtime_error("Shader preset file is missing: " + presetFile_.string());
+    if (!input) throw std::runtime_error("Shader preset file is missing: " + PathToUtf8(presetFile_));
     const auto document = nlohmann::json::parse(input, nullptr, true, true);
     std::vector<ShaderPreset> loaded;
     for (const auto& item : document.at("presets")) {
@@ -60,7 +61,8 @@ std::vector<std::filesystem::path> ShaderManager::Resolve(const ShaderPreset& pr
         if (relative.is_absolute()) throw std::runtime_error("Absolute shader paths are not allowed in presets");
         const auto full = std::filesystem::weakly_canonical(shaderRoot_ / relative);
         if (!IsInsideRoot(full)) throw std::runtime_error("Shader preset escapes the shader directory");
-        if (!std::filesystem::is_regular_file(full)) throw std::runtime_error("Shader is missing: " + relative.string());
+        if (!std::filesystem::is_regular_file(full))
+            throw std::runtime_error("Shader is missing: " + PathToUtf8(relative));
         if (full.extension() != ".glsl") throw std::runtime_error("Only .glsl shader files are accepted");
         result.push_back(full);
     }

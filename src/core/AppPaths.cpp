@@ -1,4 +1,5 @@
 #include "wannaviewer/core/AppPaths.hpp"
+#include "wannaviewer/core/Path.hpp"
 
 #include <stdexcept>
 #include <system_error>
@@ -54,7 +55,7 @@ void AppPaths::EnsureWritableDirectories() const {
         std::error_code error;
         std::filesystem::create_directories(path, error);
         if (error) {
-            throw std::runtime_error("Unable to create application directory: " + path.string());
+            throw std::runtime_error("Unable to create application directory: " + PathToUtf8(path));
         }
     }
 }

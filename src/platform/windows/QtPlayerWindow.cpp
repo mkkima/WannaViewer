@@ -124,11 +124,8 @@ std::string PlaybackIdentity(std::string_view value) {
             error.clear();
             canonical = std::filesystem::absolute(path, error);
         }
-        std::string normalized = error ? std::string(value) : canonical.string();
-#ifdef _WIN32
-        normalized = error ? ToUtf8(ToQString(value).toCaseFolded())
-                           : ToUtf8(QString::fromStdWString(canonical.wstring()).toCaseFolded());
-#endif
+        const std::string normalized = error ? ToUtf8(ToQString(value).toCaseFolded())
+                                             : ToUtf8(QString::fromStdWString(canonical.wstring()).toCaseFolded());
         error.clear();
         const auto size = std::filesystem::file_size(path, error);
         const auto safeSize = error ? std::uintmax_t{0} : size;

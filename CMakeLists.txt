@@ -28,6 +28,7 @@ set(WANNAVIEWER_COMMON_SOURCES
   src/core/AppPaths.cpp
   src/core/Config.cpp
   src/core/Logger.cpp
+  src/core/Path.cpp
   src/core/Redaction.cpp
   src/core/Url.cpp
   src/playback/MpvApi.cpp
@@ -154,6 +155,7 @@ if(WANNAVIEWER_BUILD_TESTS)
     tests/ConfigTests.cpp
     tests/ControlLayoutTests.cpp
     tests/PlaybackStateStoreTests.cpp
+    tests/PathTests.cpp
     tests/RecentMediaStoreTests.cpp
     tests/ResolverTests.cpp
     tests/SecurityTests.cpp

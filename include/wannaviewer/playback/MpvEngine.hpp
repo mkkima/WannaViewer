@@ -90,6 +90,7 @@ public:
     [[nodiscard]] double Position() const;
     [[nodiscard]] double Duration() const;
     [[nodiscard]] bool IsPaused() const;
+    [[nodiscard]] bool IsMuted() const;
 
 private:
     void SetRequiredOption(const char* name, const std::string& value);

@@ -46,6 +46,7 @@
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QStyle>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantAnimation>
@@ -73,6 +74,7 @@ constexpr int kControlsHideDelayMs = 1100;
 constexpr int kUiIntervalMs = 50;
 constexpr int kPanelEnterDurationMs = 190;
 constexpr int kPanelExitDurationMs = 140;
+constexpr int kFeedbackDurationMs = 950;
 constexpr UINT kBackgroundTestQueryMessage = WM_APP + 0x250;
 constexpr UINT kBackgroundTestActionMessage = WM_APP + 0x251;
 
@@ -106,7 +108,7 @@ QString DisplayLabel(std::string_view value, const char* fallback) {
 }
 
 enum class Glyph {
-    Play, Pause, Back, Forward, Volume, Audio, Subtitles, Hd, Sparkle,
+    Play, Pause, Back, Forward, Volume, Muted, Audio, Subtitles, Hd, Sparkle,
     Statistics, Settings, Fullscreen
 };
 
@@ -143,13 +145,19 @@ QIcon MakeIcon(Glyph glyph, QColor color = QColor(244, 244, 246)) {
         painter.drawText(QRectF(18.0, 21.0, 28.0, 25.0), Qt::AlignCenter, QStringLiteral("10"));
         break;
     }
-    case Glyph::Volume: {
+    case Glyph::Volume:
+    case Glyph::Muted: {
         QPainterPath speaker;
         speaker.moveTo(17.0, 27.0); speaker.lineTo(24.0, 27.0); speaker.lineTo(32.0, 20.0);
         speaker.lineTo(32.0, 44.0); speaker.lineTo(24.0, 37.0); speaker.lineTo(17.0, 37.0); speaker.closeSubpath();
         painter.drawPath(speaker);
-        painter.drawArc(QRectF(27.0, 23.0, 18.0, 18.0), -55 * 16, 110 * 16);
-        painter.drawArc(QRectF(25.0, 17.0, 30.0, 30.0), -50 * 16, 100 * 16);
+        if (glyph == Glyph::Muted) {
+            painter.drawLine(QPointF(40.0, 25.0), QPointF(51.0, 39.0));
+            painter.drawLine(QPointF(51.0, 25.0), QPointF(40.0, 39.0));
+        } else {
+            painter.drawArc(QRectF(27.0, 23.0, 18.0, 18.0), -55 * 16, 110 * 16);
+            painter.drawArc(QRectF(25.0, 17.0, 30.0, 30.0), -50 * 16, 100 * 16);
+        }
         break;
     }
     case Glyph::Audio:
@@ -200,6 +208,14 @@ QIcon MakeIcon(Glyph glyph, QColor color = QColor(244, 244, 246)) {
         break;
     }
     return QIcon(pixmap);
+}
+
+void SetButtonActive(QPushButton* button, bool active) {
+    if (!button || button->property("active").toBool() == active) return;
+    button->setProperty("active", active);
+    button->style()->unpolish(button);
+    button->style()->polish(button);
+    button->update();
 }
 
 class PolishedSlider final : public QSlider {
@@ -623,6 +639,12 @@ void QtPlayerWindow::BuildUi() {
     statistics_->setWordWrap(false);
     statistics_->hide();
 
+    playbackFeedback_ = new QLabel(this);
+    playbackFeedback_->setObjectName(QStringLiteral("playbackFeedback"));
+    playbackFeedback_->setAlignment(Qt::AlignCenter);
+    playbackFeedback_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    playbackFeedback_->hide();
+
     modalScrim_ = new QFrame(this);
     modalScrim_->setObjectName(QStringLiteral("modalScrim"));
     modalScrim_->setFocusPolicy(Qt::NoFocus);
@@ -687,9 +709,10 @@ void QtPlayerWindow::BuildUi() {
     sourceTransition_ = std::make_unique<UiTransition>(sourcePanel_, this, 16,
                                                        [this] { ClearSourceSelectorWidgets(); });
     statisticsTransition_ = std::make_unique<UiTransition>(statistics_, this, 10);
-    const std::array<UiTransition*, 6> transitions{
+    feedbackTransition_ = std::make_unique<UiTransition>(playbackFeedback_, this, 8);
+    const std::array<UiTransition*, 7> transitions{
         emptyTransition_.get(), openingTransition_.get(), scrimTransition_.get(),
-        overlayTransition_.get(), sourceTransition_.get(), statisticsTransition_.get()};
+        overlayTransition_.get(), sourceTransition_.get(), statisticsTransition_.get(), feedbackTransition_.get()};
     for (UiTransition* transition : transitions) {
         connect(transition->group, &QParallelAnimationGroup::finished, this, [transition] {
             transition->widget->setGeometry(transition->restingGeometry);
@@ -707,6 +730,9 @@ void QtPlayerWindow::BuildUi() {
     hideTimer_ = new QTimer(this);
     hideTimer_->setSingleShot(true);
     hideTimer_->setInterval(kControlsHideDelayMs);
+    feedbackTimer_ = new QTimer(this);
+    feedbackTimer_->setSingleShot(true);
+    feedbackTimer_->setInterval(kFeedbackDurationMs);
     uiTimer_ = new QTimer(this);
     uiTimer_->setInterval(kUiIntervalMs);
     uiTimer_->setTimerType(Qt::PreciseTimer);
@@ -718,12 +744,13 @@ void QtPlayerWindow::ConnectUi() {
     connect(openFileButton_, &QPushButton::clicked, this, [this] { OpenFileDialog(); });
     connect(emptyPlayIcon_, &QPushButton::clicked, this, [this] { OpenFileDialog(); });
     connect(openUrlButton_, &QPushButton::clicked, this, [this] { ShowUrlOverlay(); });
-    connect(playButton_, &QPushButton::clicked, this, [this] { engine_.TogglePause(); RecordInteraction(); });
-    connect(rewindButton_, &QPushButton::clicked, this, [this] { engine_.SeekRelative(-10.0); RecordInteraction(); });
-    connect(forwardButton_, &QPushButton::clicked, this, [this] { engine_.SeekRelative(10.0); RecordInteraction(); });
-    connect(muteButton_, &QPushButton::clicked, this, [this] { engine_.ToggleMute(); RecordInteraction(); });
+    connect(playButton_, &QPushButton::clicked, this, [this] { TogglePlayback(); });
+    connect(rewindButton_, &QPushButton::clicked, this, [this] { SeekRelative(-10.0); });
+    connect(forwardButton_, &QPushButton::clicked, this, [this] { SeekRelative(10.0); });
+    connect(muteButton_, &QPushButton::clicked, this, [this] { ToggleMute(); });
     connect(volume_, &QSlider::valueChanged, this, [this](int value) {
         if (engineReady_ && mediaLoaded_) engine_.SetVolume(static_cast<double>(value));
+        if (mediaLoaded_) ShowPlaybackFeedback(QStringLiteral("Volume  ·  %1%").arg(value));
         RecordInteraction();
     });
     connect(timeline_, &QSlider::sliderPressed, this, [this] { timelineDragging_ = true; RecordInteraction(); });
@@ -769,6 +796,7 @@ void QtPlayerWindow::ConnectUi() {
         ShowControls(false);
     });
     connect(uiTimer_, &QTimer::timeout, this, [this] { UpdateUi(); });
+    connect(feedbackTimer_, &QTimer::timeout, this, [this] { HidePlaybackFeedback(); });
     connect(controlsAnimation_, &QPropertyAnimation::finished, this, [this] {
         if (!controlsVisible_) controls_->hide();
     });
@@ -785,6 +813,8 @@ void QtPlayerWindow::ApplyTheme() {
         QPushButton:pressed { background: #303037; }
         QPushButton:disabled { color: #66666d; background: transparent; border-color: transparent; }
         QPushButton[chrome="true"] { padding: 0; background: transparent; border: none; border-radius: 19px; }
+        QPushButton[chrome="true"][active="true"] { background: #3a3a42; }
+        QPushButton[chrome="true"][active="true"]:hover { background: #4a4a54; }
         QPushButton[chrome="true"]:hover { background: #24242a; }
         QPushButton[chrome="true"]:pressed { background: #34343b; }
         QPushButton#primaryButton { background: #f4f4f6; color: #070708; border-color: #f4f4f6; font-weight: 600; }
@@ -803,6 +833,9 @@ void QtPlayerWindow::ApplyTheme() {
         QLabel#statistics { background: rgba(7, 7, 9, 230); border: 1px solid #34343a;
                             border-radius: 14px; padding: 14px; color: #e8e8ec;
                             font-family: "Cascadia Mono", "Consolas"; font-size: 12px; }
+        QLabel#playbackFeedback { background: rgba(12, 12, 15, 235); border: 1px solid #42424a;
+                                  border-radius: 18px; padding: 10px 18px; color: #f4f4f6;
+                                  font-size: 15px; font-weight: 600; }
         QLineEdit, QComboBox, QListWidget { color: #f2f2f4; background: #121216; border: 1px solid #383840;
                                            border-radius: 12px; padding: 8px 11px; selection-background-color: #33333a; }
         QLineEdit:focus, QComboBox:focus, QListWidget:focus { border-color: #73737d; }
@@ -851,12 +884,20 @@ void QtPlayerWindow::LayoutOverlays() {
                                    sourceSize.width(), sourceSize.height()));
     updateTransitionGeometry(*statisticsTransition_,
                              QRect(18, 18, std::min(560, std::max(320, width() - 36)),
-                                   std::min(350, std::max(220, height() - 36))));
+                                    std::min(350, std::max(220, height() - 36))));
+    const QSize feedbackHint = playbackFeedback_->sizeHint().expandedTo(QSize(150, 48));
+    const QSize feedbackSize(std::min(std::max(150, feedbackHint.width()), std::max(150, width() - 48)),
+                             feedbackHint.height());
+    updateTransitionGeometry(*feedbackTransition_,
+                             QRect((width() - feedbackSize.width()) / 2,
+                                   std::max(24, (height() - feedbackSize.height()) / 2),
+                                   feedbackSize.width(), feedbackSize.height()));
     videoSurface_->lower();
     if (emptyState_->isVisible()) emptyState_->raise();
     if (openingState_->isVisible()) openingState_->raise();
     if (controls_->isVisible()) controls_->raise();
     if (statistics_->isVisible()) statistics_->raise();
+    if (playbackFeedback_->isVisible()) playbackFeedback_->raise();
     if (modalScrim_->isVisible()) modalScrim_->raise();
     if (sourcePanel_->isVisible()) sourcePanel_->raise();
     if (overlay_->isVisible()) overlay_->raise();
@@ -865,12 +906,18 @@ void QtPlayerWindow::LayoutOverlays() {
 void QtPlayerWindow::UpdateVisibility() {
     LayoutOverlays();
     const bool modalVisible = sourceSelection_.has_value() || overlayMode_ != OverlayMode::None;
+    if (modalVisible && feedbackVisible_) {
+        feedbackVisible_ = false;
+        feedbackTimer_->stop();
+    }
     SetTransitionVisible(*emptyTransition_,
                          !mediaLoaded_ && !mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
     SetTransitionVisible(*openingTransition_, mediaOpening_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
     controls_->setVisible(mediaLoaded_ && controlsVisible_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
     SetTransitionVisible(*statisticsTransition_,
                          statisticsVisible_ && mediaLoaded_ && !sourceSelection_ && overlayMode_ == OverlayMode::None);
+    SetTransitionVisible(*feedbackTransition_,
+                         feedbackVisible_ && (mediaLoaded_ || backgroundTest_) && !modalVisible);
     SetTransitionVisible(*scrimTransition_, modalVisible);
     SetTransitionVisible(*sourceTransition_, sourceSelection_.has_value());
     SetTransitionVisible(*overlayTransition_, overlayMode_ != OverlayMode::None);
@@ -927,9 +974,9 @@ void QtPlayerWindow::SetTransitionVisible(UiTransition& transition, bool visible
 
 void QtPlayerWindow::StopUiAnimations() {
     controlsAnimation_->stop();
-    const std::array<UiTransition*, 6> transitions{
+    const std::array<UiTransition*, 7> transitions{
         emptyTransition_.get(), openingTransition_.get(), scrimTransition_.get(),
-        overlayTransition_.get(), sourceTransition_.get(), statisticsTransition_.get()};
+        overlayTransition_.get(), sourceTransition_.get(), statisticsTransition_.get(), feedbackTransition_.get()};
     for (UiTransition* transition : transitions) {
         transition->group->stop();
         transition->widget->setGeometry(transition->restingGeometry);
@@ -1026,6 +1073,25 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 15:
             *result = overlay_->y() - overlayTransition_->restingGeometry.y();
             return true;
+        case 16:
+            value = playbackFeedback_->isVisible();
+            break;
+        case 17:
+            *result = qRound(feedbackTransition_->effect->opacity() * 1000.0);
+            return true;
+        case 18:
+            *result = playbackFeedback_->y() - feedbackTransition_->restingGeometry.y();
+            return true;
+        case 19: {
+            int states = 0;
+            if (muteButton_->property("active").toBool()) states |= 1;
+            if (subtitleButton_->property("active").toBool()) states |= 2;
+            if (shaderButton_->property("active").toBool()) states |= 4;
+            if (statsButton_->property("active").toBool()) states |= 8;
+            if (fullscreenButton_->property("active").toBool()) states |= 16;
+            *result = states;
+            return true;
+        }
         default:
             break;
         }
@@ -1114,6 +1180,34 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             emptyTransition_->group->resume();
             scrimTransition_->group->resume();
             overlayTransition_->group->resume();
+            break;
+        case 13:
+            ShowPlaybackFeedback(QStringLiteral("Paused"));
+            feedbackTimer_->stop();
+            if (feedbackTransition_->group->state() == QAbstractAnimation::Running) {
+                feedbackTransition_->group->setCurrentTime(feedbackTransition_->group->duration() / 2);
+                feedbackTransition_->group->pause();
+            }
+            break;
+        case 14:
+            feedbackTransition_->group->resume();
+            break;
+        case 15:
+            feedbackVisible_ = false;
+            UpdateVisibility();
+            if (feedbackTransition_->group->state() == QAbstractAnimation::Running) {
+                feedbackTransition_->group->setCurrentTime(feedbackTransition_->group->duration() / 2);
+                feedbackTransition_->group->pause();
+            }
+            break;
+        case 16:
+            feedbackTransition_->group->resume();
+            break;
+        case 17:
+            ToggleStatistics();
+            break;
+        case 18:
+            ToggleMute();
             break;
         default: *result = 0; return true;
         }
@@ -1216,20 +1310,26 @@ void QtPlayerWindow::keyPressEvent(QKeyEvent* event) {
         ApplyShaderHotkey(event->key() - Qt::Key_0);
     else if (control && event->key() == Qt::Key_O) OpenFileDialog();
     else if (control && event->key() == Qt::Key_U) ShowUrlOverlay();
-    else if (event->key() == Qt::Key_Space) engine_.TogglePause();
-    else if (event->key() == Qt::Key_Left) engine_.SeekRelative(shift ? -30.0 : -5.0);
-    else if (event->key() == Qt::Key_Right) engine_.SeekRelative(shift ? 30.0 : 5.0);
-    else if (event->key() == Qt::Key_Period) engine_.FrameStep();
-    else if (event->key() == Qt::Key_PageUp) engine_.ChangeChapter(-1);
-    else if (event->key() == Qt::Key_PageDown) engine_.ChangeChapter(1);
+    else if (event->key() == Qt::Key_Space) TogglePlayback();
+    else if (event->key() == Qt::Key_Left) SeekRelative(shift ? -30.0 : -5.0);
+    else if (event->key() == Qt::Key_Right) SeekRelative(shift ? 30.0 : 5.0);
+    else if (event->key() == Qt::Key_Period) {
+        if (mediaLoaded_) { engine_.FrameStep(); ShowPlaybackFeedback(QStringLiteral("Next frame")); }
+    }
+    else if (event->key() == Qt::Key_PageUp) {
+        if (mediaLoaded_) { engine_.ChangeChapter(-1); ShowPlaybackFeedback(QStringLiteral("Previous chapter")); }
+    }
+    else if (event->key() == Qt::Key_PageDown) {
+        if (mediaLoaded_) { engine_.ChangeChapter(1); ShowPlaybackFeedback(QStringLiteral("Next chapter")); }
+    }
     else if (event->key() == Qt::Key_F) ToggleFullscreen();
-    else if (event->key() == Qt::Key_M) engine_.ToggleMute();
-    else if (event->key() == Qt::Key_S) engine_.CycleSubtitles();
-    else if (event->key() == Qt::Key_A) engine_.CycleAudio();
+    else if (event->key() == Qt::Key_M) ToggleMute();
+    else if (event->key() == Qt::Key_S) CycleSubtitleTrack();
+    else if (event->key() == Qt::Key_A) CycleAudioTrack();
     else if (event->key() == Qt::Key_I || event->key() == Qt::Key_F10) ToggleStatistics();
     else { QWidget::keyPressEvent(event); return; }
     event->accept();
-    RecordInteraction();
+    if (!(event->key() == Qt::Key_F && fullscreen_)) RecordInteraction();
 }
 
 void QtPlayerWindow::StartEngineInitialization() {
@@ -1661,6 +1761,7 @@ void QtPlayerWindow::HandlePlaybackEvent(PlaybackEvent event) {
         break;
     case PlaybackEventType::FileLoaded:
         logger_.Write(LogLevel::Info, "playback", "media metadata and tracks loaded");
+        engine_.SetVolume(static_cast<double>(volume_->value()));
         SetMediaLoaded(true);
         setWindowTitle(benchmarkMode_ ? QStringLiteral("WannaViewer — benchmark buffering")
                                       : QStringLiteral("WannaViewer — buffering…"));
@@ -1714,6 +1815,11 @@ void QtPlayerWindow::SetMediaLoaded(bool loaded) {
     timelineDragging_ = false;
     pendingTimelineValue_.reset();
     displayedPlaying_.reset();
+    displayedMuted_.reset();
+    if (!loaded) {
+        feedbackVisible_ = false;
+        feedbackTimer_->stop();
+    }
     const std::array<QWidget*, 11> playbackControls{
         playButton_, rewindButton_, forwardButton_, muteButton_, timeline_, volume_, subtitleButton_,
         shaderButton_, statsButton_, settingsButton_, fullscreenButton_};
@@ -1732,6 +1838,7 @@ void QtPlayerWindow::SetMediaLoaded(bool loaded) {
         controlsOpacity_->setOpacity(0.0);
     }
     UpdateVisibility();
+    UpdateControlStates();
     if (loaded) {
         uiTimer_->start();
         RecordInteraction();
@@ -1789,6 +1896,15 @@ void QtPlayerWindow::UpdateUi() {
             playButton_->setIcon(MakeIcon(playing ? Glyph::Pause : Glyph::Play));
         }
     }
+    if (mediaLoaded_) {
+        const bool muted = engine_.IsMuted();
+        if (!displayedMuted_ || *displayedMuted_ != muted) {
+            displayedMuted_ = muted;
+            muteButton_->setIcon(MakeIcon(muted ? Glyph::Muted : Glyph::Volume));
+            muteButton_->setToolTip(muted ? QStringLiteral("Unmute") : QStringLiteral("Mute"));
+            UpdateControlStates();
+        }
+    }
     if (statisticsVisible_ && (lastStatisticsUpdate_ == std::chrono::steady_clock::time_point{} ||
         steadyNow - lastStatisticsUpdate_ >= std::chrono::milliseconds(500))) {
         lastStatisticsUpdate_ = steadyNow;
@@ -1818,8 +1934,76 @@ void QtPlayerWindow::SeekFromSlider(bool commit) {
         pendingTimelineValue_ = timeline_->value();
         pendingTimelineStarted_ = std::chrono::steady_clock::now();
         engine_.SeekAbsolute(seconds);
+        ShowPlaybackFeedback(QStringLiteral("Seek  ·  %1").arg(TimeText(seconds)));
     }
     RecordInteraction();
+}
+
+void QtPlayerWindow::TogglePlayback() {
+    if (!mediaLoaded_) return;
+    const bool willPause = !engine_.IsPaused();
+    engine_.TogglePause();
+    ShowPlaybackFeedback(willPause ? QStringLiteral("Paused") : QStringLiteral("Playing"));
+    RecordInteraction();
+}
+
+void QtPlayerWindow::ToggleMute() {
+    if (!mediaLoaded_) return;
+    const bool willMute = !engine_.IsMuted();
+    engine_.ToggleMute();
+    ShowPlaybackFeedback(willMute ? QStringLiteral("Muted") : QStringLiteral("Sound on"));
+    RecordInteraction();
+}
+
+void QtPlayerWindow::SeekRelative(double seconds) {
+    if (!mediaLoaded_) return;
+    engine_.SeekRelative(seconds);
+    ShowPlaybackFeedback(seconds < 0.0
+        ? QStringLiteral("Back  ·  %1 seconds").arg(qRound(std::abs(seconds)))
+        : QStringLiteral("Forward  ·  %1 seconds").arg(qRound(seconds)));
+    RecordInteraction();
+}
+
+void QtPlayerWindow::CycleAudioTrack() {
+    if (!mediaLoaded_ || audioTrackIds_.empty()) return;
+    const int next = (audioSelection_ + 1) % static_cast<int>(audioTrackIds_.size());
+    audioSelection_ = next;
+    engine_.SetAudioTrack(audioTrackIds_[static_cast<std::size_t>(next)]);
+    ShowPlaybackFeedback(QStringLiteral("Audio  ·  %1").arg(audioTrackLabels_[static_cast<std::size_t>(next)]));
+    RecordInteraction();
+}
+
+void QtPlayerWindow::CycleSubtitleTrack() {
+    if (!mediaLoaded_ || subtitleTrackIds_.empty()) return;
+    const int next = (subtitleSelection_ + 1) % static_cast<int>(subtitleTrackIds_.size());
+    subtitleSelection_ = next;
+    engine_.SetSubtitleTrack(subtitleTrackIds_[static_cast<std::size_t>(next)]);
+    UpdateControlStates();
+    ShowPlaybackFeedback(QStringLiteral("Subtitles  ·  %1").arg(subtitleTrackLabels_[static_cast<std::size_t>(next)]));
+    RecordInteraction();
+}
+
+void QtPlayerWindow::ShowPlaybackFeedback(QString text) {
+    if ((!mediaLoaded_ && !backgroundTest_) || overlayMode_ != OverlayMode::None || sourceSelection_) return;
+    playbackFeedback_->setText(std::move(text));
+    feedbackVisible_ = true;
+    UpdateVisibility();
+    feedbackTimer_->start();
+}
+
+void QtPlayerWindow::HidePlaybackFeedback() {
+    feedbackTimer_->stop();
+    if (!feedbackVisible_) return;
+    feedbackVisible_ = false;
+    UpdateVisibility();
+}
+
+void QtPlayerWindow::UpdateControlStates() {
+    SetButtonActive(muteButton_, mediaLoaded_ && displayedMuted_.value_or(false));
+    SetButtonActive(subtitleButton_, mediaLoaded_ && subtitleSelection_ > 0);
+    SetButtonActive(shaderButton_, mediaLoaded_ && shaderPresetIndex_ != 0);
+    SetButtonActive(statsButton_, mediaLoaded_ && statisticsVisible_);
+    SetButtonActive(fullscreenButton_, mediaLoaded_ && fullscreen_);
 }
 
 void QtPlayerWindow::RecordInteraction() {
@@ -1890,15 +2074,19 @@ void QtPlayerWindow::UpdateTracks() {
     audioButton_->setEnabled(mediaLoaded_ && !audioTrackIds_.empty());
     subtitleButton_->setEnabled(mediaLoaded_);
     videoButton_->setEnabled(mediaLoaded_ && !videoTrackIds_.empty());
+    UpdateControlStates();
 }
 
 void QtPlayerWindow::ToggleFullscreen() {
     fullscreen_ = !fullscreen_;
+    UpdateControlStates();
     if (fullscreen_) {
         showFullScreen();
         ShowControls(false, false);
+        ShowPlaybackFeedback(QStringLiteral("Full screen"));
     } else {
         showNormal();
+        ShowPlaybackFeedback(QStringLiteral("Windowed"));
         RecordInteraction();
     }
 }
@@ -1910,7 +2098,10 @@ void QtPlayerWindow::ToggleStatistics() {
         lastStatisticsUpdate_ = {};
         uiTimer_->start();
     }
+    UpdateControlStates();
     UpdateVisibility();
+    ShowPlaybackFeedback(statisticsVisible_ ? QStringLiteral("Statistics on")
+                                            : QStringLiteral("Statistics off"));
     RecordInteraction();
 }
 
@@ -2015,12 +2206,16 @@ void QtPlayerWindow::ApplyOverlaySelection() {
         if (action == OverlayAction::Audio && static_cast<std::size_t>(selected) < audioTrackIds_.size()) {
             audioSelection_ = selected;
             engine_.SetAudioTrack(audioTrackIds_[static_cast<std::size_t>(selected)]);
+            ShowPlaybackFeedback(QStringLiteral("Audio  ·  %1").arg(audioTrackLabels_[static_cast<std::size_t>(selected)]));
         } else if (action == OverlayAction::Subtitles && static_cast<std::size_t>(selected) < subtitleTrackIds_.size()) {
             subtitleSelection_ = selected;
             engine_.SetSubtitleTrack(subtitleTrackIds_[static_cast<std::size_t>(selected)]);
+            UpdateControlStates();
+            ShowPlaybackFeedback(QStringLiteral("Subtitles  ·  %1").arg(subtitleTrackLabels_[static_cast<std::size_t>(selected)]));
         } else if (action == OverlayAction::Video && static_cast<std::size_t>(selected) < videoTrackIds_.size()) {
             videoSelection_ = selected;
             engine_.SetVideoTrack(videoTrackIds_[static_cast<std::size_t>(selected)]);
+            ShowPlaybackFeedback(QStringLiteral("Video  ·  %1").arg(videoTrackLabels_[static_cast<std::size_t>(selected)]));
         } else if (action == OverlayAction::Shaders) {
             ApplyShaderPreset(static_cast<std::size_t>(selected));
         } else if (action == OverlayAction::Settings && selected >= 0 && selected <= 2) {
@@ -2028,16 +2223,23 @@ void QtPlayerWindow::ApplyOverlaySelection() {
             engine_.ConfigureCache(value);
             config_.Set("network.cache_mode", value);
             config_.Save(paths_.config / "player.conf");
+            ShowPlaybackFeedback(QStringLiteral("Cache  ·  %1").arg(selected == 0 ? QStringLiteral("Low latency") :
+                                                                    selected == 2 ? QStringLiteral("Unstable connection") :
+                                                                                    QStringLiteral("Balanced")));
         } else if (action == OverlayAction::Settings && (selected == 3 || selected == 4)) {
             const bool enabled = selected == 3;
             engine_.SetHardwareDecoding(enabled);
             config_.Set("playback.hwdec", enabled ? "auto" : "no");
             config_.Save(paths_.config / "player.conf");
+            ShowPlaybackFeedback(enabled ? QStringLiteral("Hardware decoding  ·  Auto")
+                                         : QStringLiteral("Hardware decoding  ·  Off"));
         } else if (action == OverlayAction::Settings && (selected == 5 || selected == 6)) {
             const std::string value = selected == 5 ? "display-resample" : "audio";
             engine_.SetVideoSync(value);
             config_.Set("playback.video_sync", value);
             config_.Save(paths_.config / "player.conf");
+            ShowPlaybackFeedback(selected == 5 ? QStringLiteral("Frame pacing  ·  Display resample")
+                                               : QStringLiteral("Frame pacing  ·  Audio clock"));
         }
     } catch (const std::exception& error) {
         ShowError(QStringLiteral("Action failed"), error.what());
@@ -2055,9 +2257,12 @@ void QtPlayerWindow::ApplyShaderHotkey(int hotkey) {
         });
         shaderPresetIndex_ = iterator == shaders_.Presets().end()
             ? 0U : static_cast<std::size_t>(std::distance(shaders_.Presets().begin(), iterator));
+        UpdateControlStates();
+        ShowPlaybackFeedback(QStringLiteral("Shaders  ·  %1").arg(ToQString(preset->name)));
     } catch (const std::exception& error) {
         engine_.SetShaders({});
         shaderPresetIndex_ = 0;
+        UpdateControlStates();
         ShowError(QStringLiteral("Shader"), error.what());
     }
 }
@@ -2068,9 +2273,12 @@ void QtPlayerWindow::ApplyShaderPreset(std::size_t index) {
     try {
         engine_.SetShaders(shaders_.Resolve(shaders_.Presets()[index]));
         shaderPresetIndex_ = index;
+        UpdateControlStates();
+        ShowPlaybackFeedback(QStringLiteral("Shaders  ·  %1").arg(ToQString(shaders_.Presets()[index].name)));
     } catch (const std::exception& error) {
         engine_.SetShaders({});
         shaderPresetIndex_ = 0;
+        UpdateControlStates();
         ShowError(QStringLiteral("Shader"), error.what());
     }
 }
@@ -2093,9 +2301,12 @@ void QtPlayerWindow::OpenCustomShaders() {
         }
         engine_.SetShaders(imported);
         shaderPresetIndex_ = shaders_.Presets().size();
+        UpdateControlStates();
+        ShowPlaybackFeedback(QStringLiteral("Shaders  ·  Custom"));
     } catch (const std::exception& error) {
         engine_.SetShaders({});
         shaderPresetIndex_ = 0;
+        UpdateControlStates();
         ShowError(QStringLiteral("Custom shaders"), error.what());
     }
 }

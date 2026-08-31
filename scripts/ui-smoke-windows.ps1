@@ -95,6 +95,20 @@ try {
         Invoke-UiAction $window 3
         if ((Get-UiValue $window 6) -ne 1) { throw 'Playback controls did not appear' }
         if ((Get-UiValue $window 11) -ne 1000) { throw 'Playback controls appeared with incomplete opacity' }
+        Invoke-UiAction $window 4
+        if ((Get-UiValue $window 6) -ne 0) { throw 'Playback controls did not hide cleanly' }
+        if ((Get-UiValue $window 11) -ne 0) { throw 'Hidden playback controls retained opacity' }
+        Invoke-UiAction $window 3
+        if ((Get-UiValue $window 6) -ne 1) { throw 'Playback controls did not reappear cleanly' }
+        if ((Get-UiValue $window 11) -ne 1000) { throw 'Playback controls reappeared with incomplete opacity' }
+
+        Invoke-UiAction $window 6
+        if ((Get-UiValue $window 7) -lt 4900 -or (Get-UiValue $window 7) -gt 5100) {
+            throw "Timeline did not retain the exact selected position: $(Get-UiValue $window 7)"
+        }
+        if ((Get-UiValue $window 16) -ne 1 -or (Get-UiValue $window 17) -ne 1000) {
+            throw 'Timeline seek did not show settled playback feedback'
+        }
         if ($CapturePath) {
             Add-Type -AssemblyName System.Drawing
             $rectangle = [WannaViewerQtPlaybackSmokeNative+RECT]::new()
@@ -118,19 +132,32 @@ try {
             try { $bitmap.Save($captureFile, [Drawing.Imaging.ImageFormat]::Png) }
             finally { $bitmap.Dispose() }
         }
-        Invoke-UiAction $window 4
-        if ((Get-UiValue $window 6) -ne 0) { throw 'Playback controls did not hide cleanly' }
-        if ((Get-UiValue $window 11) -ne 0) { throw 'Hidden playback controls retained opacity' }
-        Invoke-UiAction $window 3
-        if ((Get-UiValue $window 6) -ne 1) { throw 'Playback controls did not reappear cleanly' }
-        if ((Get-UiValue $window 11) -ne 1000) { throw 'Playback controls reappeared with incomplete opacity' }
-
-        Invoke-UiAction $window 6
-        if ((Get-UiValue $window 7) -lt 4900 -or (Get-UiValue $window 7) -gt 5100) {
-            throw "Timeline did not retain the exact selected position: $(Get-UiValue $window 7)"
-        }
         Start-Sleep -Milliseconds 500
         if ((Get-UiValue $window 8) -le 0) { throw 'Timeline seek did not advance playback position' }
+
+        Invoke-UiAction $window 17
+        if (((Get-UiValue $window 19) -band 8) -eq 0) {
+            throw 'Statistics button did not expose its active state'
+        }
+        Invoke-UiAction $window 17
+        if (((Get-UiValue $window 19) -band 8) -ne 0) {
+            throw 'Statistics button retained its active state after being disabled'
+        }
+
+        Invoke-UiAction $window 18
+        $stateDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        do { Start-Sleep -Milliseconds 20 }
+        while (((Get-UiValue $window 19) -band 1) -eq 0 -and [DateTime]::UtcNow -lt $stateDeadline)
+        if (((Get-UiValue $window 19) -band 1) -eq 0) {
+            throw 'Mute button did not expose its active state'
+        }
+        Invoke-UiAction $window 18
+        $stateDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        do { Start-Sleep -Milliseconds 20 }
+        while (((Get-UiValue $window 19) -band 1) -ne 0 -and [DateTime]::UtcNow -lt $stateDeadline)
+        if (((Get-UiValue $window 19) -band 1) -ne 0) {
+            throw 'Mute button retained its active state after sound was restored'
+        }
 
         foreach ($key in @(0x20,0x20,0x27,0x53,0x41,0x46,0x46,0x79)) {
             [void][WannaViewerQtPlaybackSmokeNative]::PostMessage($window, 0x0100, [IntPtr]$key, [IntPtr]::Zero)
@@ -151,5 +178,5 @@ try {
 if ($SkipInteractions) {
     Write-Host 'Background Qt playback smoke passed: first frame and clean close.'
 } else {
-    Write-Host 'Background Qt playback smoke passed: first frame, controls, timeline, hotkeys, clean close.'
+    Write-Host 'Background Qt playback smoke passed: first frame, controls, feedback, active states, timeline, hotkeys, clean close.'
 }

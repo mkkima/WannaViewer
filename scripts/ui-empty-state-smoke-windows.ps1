@@ -177,6 +177,38 @@ try {
             (Get-UiNumber $main 14) -ne 0) {
             throw 'Modal exit animation did not settle at its exact target state'
         }
+
+        Invoke-UiAction $main 13
+        $feedbackOpacity = Get-UiNumber $main 17
+        $feedbackOffset = Get-UiNumber $main 18
+        if (-not (Query-UiState $main 16) -or $feedbackOpacity -le 0 -or $feedbackOpacity -ge 1000 -or
+            $feedbackOffset -le 0 -or $feedbackOffset -ge 8) {
+            throw "Playback feedback entrance was not paused at an intermediate frame: opacity=$feedbackOpacity offset=$feedbackOffset"
+        }
+        Invoke-UiAction $main 14
+        $motionDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        do { Start-Sleep -Milliseconds 20 }
+        while (((Get-UiNumber $main 17) -ne 1000 -or (Get-UiNumber $main 18) -ne 0) -and
+               [DateTime]::UtcNow -lt $motionDeadline)
+        if ((Get-UiNumber $main 17) -ne 1000 -or (Get-UiNumber $main 18) -ne 0) {
+            throw 'Playback feedback entrance animation did not settle at its exact target state'
+        }
+
+        Invoke-UiAction $main 15
+        $feedbackOpacity = Get-UiNumber $main 17
+        $feedbackOffset = Get-UiNumber $main 18
+        if (-not (Query-UiState $main 16) -or $feedbackOpacity -le 0 -or $feedbackOpacity -ge 1000 -or
+            $feedbackOffset -le 0 -or $feedbackOffset -ge 8) {
+            throw "Playback feedback exit was not paused at an intermediate frame: opacity=$feedbackOpacity offset=$feedbackOffset"
+        }
+        Invoke-UiAction $main 16
+        $motionDeadline = [DateTime]::UtcNow.AddSeconds(2)
+        do { Start-Sleep -Milliseconds 20 }
+        while (((Get-UiNumber $main 17) -ne 0 -or (Query-UiState $main 16)) -and
+               [DateTime]::UtcNow -lt $motionDeadline)
+        if ((Get-UiNumber $main 17) -ne 0 -or (Query-UiState $main 16)) {
+            throw 'Playback feedback exit animation did not settle hidden'
+        }
     }
     Invoke-UiAction $main 5
     if (-not $process.WaitForExit(10000)) { throw 'Qt player did not close cleanly' }
@@ -186,7 +218,7 @@ try {
 }
 
 if ($VerifyMotion) {
-    Write-Host 'Background Qt motion smoke passed: fade, slide, scrim, settled states, clean close.'
+    Write-Host 'Background Qt motion smoke passed: panels, scrim, playback feedback, settled states, clean close.'
 } else {
     Write-Host 'Background Qt empty-state smoke passed without using the foreground desktop.'
 }

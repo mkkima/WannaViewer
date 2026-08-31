@@ -16,6 +16,9 @@ namespace {
 constexpr std::uint64_t kPauseObserver = 2;
 constexpr std::uint64_t kTrackObserver = 3;
 constexpr std::uint64_t kTimeObserver = 4;
+constexpr std::uint64_t kAudioTrackObserver = 5;
+constexpr std::uint64_t kSubtitleTrackObserver = 6;
+constexpr std::uint64_t kVideoTrackObserver = 7;
 
 std::string FormatMpvValue(const mpv_event_property& property) {
     if (!property.data) return {};
@@ -133,6 +136,9 @@ void MpvEngine::Initialize(std::uintptr_t nativeWindow, EventCallback callback) 
         (void)api_.ObserveProperty(handle_, kPauseObserver, "pause", MPV_FORMAT_FLAG);
         (void)api_.ObserveProperty(handle_, kTrackObserver, "track-list/count", MPV_FORMAT_INT64);
         (void)api_.ObserveProperty(handle_, kTimeObserver, "time-pos", MPV_FORMAT_DOUBLE);
+        (void)api_.ObserveProperty(handle_, kAudioTrackObserver, "aid", MPV_FORMAT_STRING);
+        (void)api_.ObserveProperty(handle_, kSubtitleTrackObserver, "sid", MPV_FORMAT_STRING);
+        (void)api_.ObserveProperty(handle_, kVideoTrackObserver, "vid", MPV_FORMAT_STRING);
         initialized_.store(true, std::memory_order_release);
         eventThread_ = std::jthread([this](std::stop_token token) { EventLoop(token); });
 #ifdef _WIN32
@@ -347,6 +353,9 @@ double MpvEngine::Duration() const {
 bool MpvEngine::IsPaused() const {
     return !initialized_.load(std::memory_order_acquire) || api_.GetFlag(handle_, "pause", true);
 }
+bool MpvEngine::IsMuted() const {
+    return initialized_.load(std::memory_order_acquire) && api_.GetFlag(handle_, "mute", false);
+}
 
 PlaybackStatistics MpvEngine::Statistics() {
     PlaybackStatistics result;
@@ -445,7 +454,10 @@ void MpvEngine::EventLoop(std::stop_token stopToken) {
         case MPV_EVENT_PROPERTY_CHANGE: {
             const auto* property = static_cast<mpv_event_property*>(event->data);
             if (!property || !property->name) break;
-            if (event->reply_userdata == kTrackObserver) RefreshTracks();
+            if (event->reply_userdata == kTrackObserver ||
+                event->reply_userdata == kAudioTrackObserver ||
+                event->reply_userdata == kSubtitleTrackObserver ||
+                event->reply_userdata == kVideoTrackObserver) RefreshTracks();
             if (event->reply_userdata == kTimeObserver && property->data &&
                 *static_cast<double*>(property->data) > 0.01 && !playbackStarted) {
                 playbackStarted = true;

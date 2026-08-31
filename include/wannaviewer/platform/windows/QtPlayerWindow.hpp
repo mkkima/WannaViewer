@@ -114,6 +114,14 @@ private:
     void UpdateUi();
     void UpdateTracks();
     void SeekFromSlider(bool commit);
+    void TogglePlayback();
+    void ToggleMute();
+    void SeekRelative(double seconds);
+    void CycleAudioTrack();
+    void CycleSubtitleTrack();
+    void ShowPlaybackFeedback(QString text);
+    void HidePlaybackFeedback();
+    void UpdateControlStates();
     void RecordInteraction();
     void ShowControls(bool show, bool animated = true);
     [[nodiscard]] bool CursorOverControls() const;
@@ -162,9 +170,11 @@ private:
     QPushButton* fullscreenButton_{nullptr};
     QLabel* timeLabel_{nullptr};
     QLabel* statistics_{nullptr};
+    QLabel* playbackFeedback_{nullptr};
     QGraphicsOpacityEffect* controlsOpacity_{nullptr};
     QPropertyAnimation* controlsAnimation_{nullptr};
     QTimer* hideTimer_{nullptr};
+    QTimer* feedbackTimer_{nullptr};
     QTimer* uiTimer_{nullptr};
 
     QFrame* emptyState_{nullptr};
@@ -201,6 +211,7 @@ private:
     std::unique_ptr<UiTransition> overlayTransition_;
     std::unique_ptr<UiTransition> sourceTransition_;
     std::unique_ptr<UiTransition> statisticsTransition_;
+    std::unique_ptr<UiTransition> feedbackTransition_;
 
     std::vector<std::int64_t> audioTrackIds_;
     std::vector<std::int64_t> subtitleTrackIds_;
@@ -235,6 +246,7 @@ private:
     bool startupTimeoutReported_{false};
     bool controlsVisible_{true};
     bool statisticsVisible_{false};
+    bool feedbackVisible_{false};
     bool timelineDragging_{false};
     std::optional<int> pendingTimelineValue_;
     std::chrono::steady_clock::time_point pendingTimelineStarted_{};
@@ -245,6 +257,7 @@ private:
     bool benchmarkMode_{false};
     bool benchmarkRunning_{false};
     std::optional<bool> displayedPlaying_;
+    std::optional<bool> displayedMuted_;
     std::string benchmarkInput_;
     std::string benchmarkProfile_{"hardware"};
     std::string browserRetryUrl_;

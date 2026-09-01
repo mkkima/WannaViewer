@@ -1,6 +1,7 @@
 #include "wannaviewer/rendering/ShaderManager.hpp"
 #include "wannaviewer/core/Path.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 
@@ -20,9 +21,11 @@ void ShaderManager::Reload() {
         ShaderPreset preset;
         preset.id = item.at("id").get<std::string>();
         preset.name = item.at("name").get<std::string>();
+        preset.aliases = item.value("aliases", std::vector<std::string>{});
         preset.hotkey = item.value("hotkey", 0);
         preset.performanceClass = item.value("performance_class", "custom");
-        if (preset.id.empty() || preset.name.empty() || preset.hotkey < 0 || preset.hotkey > 9)
+        if (preset.id.empty() || preset.name.empty() || preset.hotkey < 0 || preset.hotkey > 9 ||
+            std::ranges::any_of(preset.aliases, [](const std::string& alias) { return alias.empty(); }))
             throw std::runtime_error("Invalid shader preset metadata");
         for (const auto& shader : item.value("shaders", nlohmann::json::array()))
             preset.shaders.emplace_back(shader.get<std::string>());
@@ -36,7 +39,9 @@ void ShaderManager::Reload() {
 const std::vector<ShaderPreset>& ShaderManager::Presets() const noexcept { return presets_; }
 
 const ShaderPreset* ShaderManager::Find(std::string_view id) const noexcept {
-    for (const auto& preset : presets_) if (preset.id == id) return &preset;
+    for (const auto& preset : presets_) {
+        if (preset.id == id || std::ranges::find(preset.aliases, id) != preset.aliases.end()) return &preset;
+    }
     return nullptr;
 }
 

@@ -1312,6 +1312,12 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
             value = recentList_->currentItem() &&
                     recentList_->currentItem()->data(Qt::UserRole + 1).toBool();
             break;
+        case 30:
+            *result = overlayAction_ == OverlayAction::Shaders ? overlayList_->count() : 0;
+            return true;
+        case 31:
+            value = overlayMode_ == OverlayMode::Message && overlay_->isVisible();
+            break;
         default:
             break;
         }
@@ -1487,6 +1493,19 @@ bool QtPlayerWindow::nativeEvent(const QByteArray& eventType, void* message, qin
         case 32:
             RecordInteraction();
             break;
+        case 33: ApplyShaderPreset(2); break;
+        case 34: ApplyShaderPreset(3); break;
+        case 35: ApplyShaderPreset(4); break;
+        case 36: ApplyShaderPreset(5); break;
+        case 37: ApplyShaderPreset(6); break;
+        case 38: ShowShaderMenu(); break;
+        case 39: videoSurface_->ResetPresentedFrame(); break;
+        case 40: {
+            const auto index = static_cast<std::size_t>(nativeMessage->lParam);
+            if (index == 0 || index >= shaders_.Presets().size()) { *result = 0; return true; }
+            ApplyShaderPreset(index, false);
+            break;
+        }
         default: *result = 0; return true;
         }
         *result = 1;
@@ -2778,7 +2797,8 @@ void QtPlayerWindow::ShowShaderMenu() {
     choices.reserve(shaders_.Presets().size() + 1U);
     for (const auto& preset : shaders_.Presets()) choices.push_back(ToQString(preset.name));
     choices.push_back(QStringLiteral("Custom GLSL…"));
-    ShowChoiceOverlay(QStringLiteral("Video shaders"), QStringLiteral("Choose a preset or load custom GLSL files"),
+    ShowChoiceOverlay(QStringLiteral("Video shaders"),
+                      QStringLiteral("A: restore  ·  B: soft restore  ·  C: denoise  ·  +: second pass"),
                       std::move(choices), static_cast<int>(shaderPresetIndex_), OverlayAction::Shaders);
 }
 

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Player = "$PSScriptRoot\..\dist\windows-x64\player.exe",
-    [Parameter(Mandatory=$true)][string]$Media
+    [Parameter(Mandatory=$true)][string]$Media,
+    [switch]$VerifyAnime4KModes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,6 +82,35 @@ try {
     $rendered = [WannaViewerOpenGlSmokeNative]::SendMessage(
         $window, 0x8250, [IntPtr]10, [IntPtr]::Zero) -ne [IntPtr]::Zero
 
+    if ($VerifyAnime4KModes) {
+        for ($shaderIndex = 1; $shaderIndex -le 6; ++$shaderIndex) {
+            [void][WannaViewerOpenGlSmokeNative]::SendMessage(
+                $window, 0x8251, [IntPtr]39, [IntPtr]::Zero)
+            $applied = [WannaViewerOpenGlSmokeNative]::SendMessage(
+                $window, 0x8251, [IntPtr]40, [IntPtr]$shaderIndex) -ne [IntPtr]::Zero
+            if (-not $applied) { throw "Unable to apply Anime4K mode index $shaderIndex" }
+
+            $shaderDeadline = [DateTime]::UtcNow.AddSeconds(8)
+            do {
+                Start-Sleep -Milliseconds 40
+                $process.Refresh()
+                $frameAfterShader = [WannaViewerOpenGlSmokeNative]::SendMessage(
+                    $window, 0x8250, [IntPtr]10, [IntPtr]::Zero) -ne [IntPtr]::Zero
+            } while (-not $process.HasExited -and -not $frameAfterShader -and
+                     [DateTime]::UtcNow -lt $shaderDeadline)
+            if ($process.HasExited) { throw "Qt OpenGL player exited while applying Anime4K mode index $shaderIndex" }
+            if (-not $frameAfterShader) { throw "Anime4K mode index $shaderIndex did not produce a rendered frame" }
+            $activeIndex = [WannaViewerOpenGlSmokeNative]::SendMessage(
+                $window, 0x8250, [IntPtr]27, [IntPtr]::Zero).ToInt64()
+            if ($activeIndex -ne $shaderIndex) {
+                throw "Anime4K mode index $shaderIndex was not retained; active index is $activeIndex"
+            }
+            $shaderErrorVisible = [WannaViewerOpenGlSmokeNative]::SendMessage(
+                $window, 0x8250, [IntPtr]31, [IntPtr]::Zero) -ne [IntPtr]::Zero
+            if ($shaderErrorVisible) { throw "Anime4K mode index $shaderIndex opened an error dialog" }
+        }
+    }
+
     [void][WannaViewerOpenGlSmokeNative]::SendMessage(
         $window, 0x8251, [IntPtr]5, [IntPtr]::Zero)
     if (-not $process.WaitForExit(30000)) { throw 'Qt OpenGL player did not close cleanly within 30 seconds' }
@@ -91,4 +121,5 @@ try {
     if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
 }
 
-Write-Host 'Background Qt/libmpv OpenGL smoke passed: real video output advanced and closed cleanly.'
+$detail = if ($VerifyAnime4KModes) { ' and all Anime4K modes rendered' } else { '' }
+Write-Host "Background Qt/libmpv OpenGL smoke passed: real video output advanced$detail and closed cleanly."

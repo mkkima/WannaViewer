@@ -39,7 +39,7 @@ Drop a media file onto the window, use **Ctrl+O**, or pass a file/direct URL on
 the command line. Use **Ctrl+U** for a URL. Controls disappear while playing.
 
 Important keys: Space play/pause, arrows seek, F fullscreen, M mute, S subtitle,
-A audio track, F10 statistics, Ctrl+0…4 shader presets, Esc leave fullscreen.
+A audio track, F10 statistics, Ctrl+0…6 Anime4K modes, Esc leave fullscreen.
 
 Site resolution is best-effort and limited to publicly accessible metadata and
 streams. Protected/DRM media, authentication bypasses, CAPTCHA bypasses, and

@@ -10,6 +10,7 @@ namespace wannaviewer {
 struct ShaderPreset final {
     std::string id;
     std::string name;
+    std::vector<std::string> aliases;
     int hotkey{0};
     std::vector<std::filesystem::path> shaders;
     std::string performanceClass;

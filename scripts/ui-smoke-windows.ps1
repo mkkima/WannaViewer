@@ -245,8 +245,22 @@ try {
             if ((Get-UiValue $window 26) -ne 0) { throw 'Animation setting did not turn off' }
             Invoke-UiAction $window 26
             if ((Get-UiValue $window 26) -ne 1) { throw 'Animation setting did not turn back on' }
+            Invoke-UiAction $window 38
+            if ((Get-UiValue $window 30) -ne 8) {
+                throw 'Shader menu did not expose Off, six Anime4K processing modes, and Custom GLSL'
+            }
+            Invoke-UiAction $window 2
+            $shaderActions = @(28, 33, 34, 35, 36, 37)
+            for ($shaderIndex = 1; $shaderIndex -le 6; ++$shaderIndex) {
+                Invoke-UiAction $window $shaderActions[$shaderIndex - 1]
+                Start-Sleep -Milliseconds 250
+                $process.Refresh()
+                if ($process.HasExited) { throw "Qt player crashed while applying Anime4K mode index $shaderIndex" }
+                if ((Get-UiValue $window 27) -ne $shaderIndex) {
+                    throw "Anime4K mode at index $shaderIndex did not become active"
+                }
+            }
             Invoke-UiAction $window 28
-            if ((Get-UiValue $window 27) -ne 1) { throw 'Named shader preset did not become active' }
             Invoke-UiAction $window 27
             if ((Get-UiValue $window 21) -ne 0) { throw 'Clear history retained the current resume entry' }
         }
@@ -271,7 +285,7 @@ try {
     if ($VerifyExtendedSettings -and (Test-Path -LiteralPath $configPath)) {
         $resumeSaved = Select-String -LiteralPath $configPath -Pattern '^playback\.resume=true$' -Quiet
         $animationsSaved = Select-String -LiteralPath $configPath -Pattern '^ui\.animations=true$' -Quiet
-        $shaderSaved = Select-String -LiteralPath $configPath -Pattern '^shader\.preset=anime4k-fast$' -Quiet
+        $shaderSaved = Select-String -LiteralPath $configPath -Pattern '^shader\.preset=anime4k-a$' -Quiet
         $extendedSettingsVerified = $resumeSaved -and $animationsSaved -and $shaderSaved
     }
     if ($configExisted) {
